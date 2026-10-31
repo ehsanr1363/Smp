@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+
+	<ItemGroup>
+	  <Compile Remove="Forms\NewFolder1\**" />
+	  <EmbeddedResource Remove="Forms\NewFolder1\**" />
+	  <None Remove="Forms\NewFolder1\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="ClosedXML" Version="0.105.1" />
+		<PackageReference Include="DbfDataReader" Version="0.8.0" />
+		<PackageReference Include="DotNetDBF" Version="7.0.1" />
+		<PackageReference Include="InsuranceToDbf" Version="1.0.9" />
+		<PackageReference Include="KamiSama.IranSystem" Version="2.8.7" />
+		<PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
+		<PackageReference Include="QuestPDF" Version="2026.9.1" />
+		<PackageReference Include="WinForms.DataVisualization" Version="1.10.2" />
+	</ItemGroup>
+
+</Project>

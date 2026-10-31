@@ -1,0 +1,27 @@
+# Visual Studio Build Artifacts
+[Bb]in/
+[Oo]bj/
+.vs/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs
+*.log
+Errors.log
+
+# Local DB / Backups
+*.bak
+*.mdf
+*.ldf
+
+# NuGet Packages (فقط در صورت نیاز، معمولا کش می‌شوند)
+# packages/
+
+# Other
+*.tmp
+Thumbs.db
+.DS_Store
