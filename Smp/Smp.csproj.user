@@ -1,0 +1,320 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <_LastSelectedProfileId>D:\PersonnelApp\PersonnelApp\PersonnelApp\Properties\PublishProfiles\FolderProfile.pubxml</_LastSelectedProfileId>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Update="Forms\AccountTransferForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\AttachmentsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\AttendanceForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\AuditLogForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BankAccountManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BankFeeForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BankInterestForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BankPaymentForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BatchPayslipPrintForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BulkCashTransactionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CarInsuranceManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CashCheckEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CashCheckListForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CashFlowForecastForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CashTransactionEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CashTransactionListForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CheckbookManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientChartPanel.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientContractEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientContractManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientContractReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientPaymentForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientReceiptListForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ClientStatementEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\CompanyManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ComprehensiveLedgerForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractArchiveViewForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractChartsPanel.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractImportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractorContractEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractorContractManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractorGuaranteeEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractorPaymentForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractorStatementEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractorStatementReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractPrintForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractsManagementDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ContractTemplateEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\Control\ucEmployeeBankAccounts.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\Control\ucEmployeeDependents.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\Control\ucEmployeeJob.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\Control\ucEmployeePersonal.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\Control\ucEmployeeSalary.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\DatabaseBackupForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\DatabaseRestoreForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\DbfImportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\DecreeManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\DecreeSalaryManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\DepartmentManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\EmployeeContractForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\EmployeeEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\EmployeeProfileForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ExcelComparisonForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ExpensePickerForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\frmEmployees.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\GlobalContractsReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\GlobalFinancialSearchForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\GlobalGuaranteesReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\GraphicalDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\InsuranceSummaryReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\LeaveManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\LiquidityDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\LoanManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\LoginForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\LookupManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\MainForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\MainSidebar.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Update="Forms\ManagementDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\NonPersonnelInsuranceReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\OfficialInsuranceReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\OfficialTaxReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PartyBankAccountsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PartyEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PartyManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PayrollHistoryForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PayrollProcessForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PayrollReportsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PayrollSummaryForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PayslipForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PersonnelDecreeForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ProfitLossDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ProjectExpenseEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ProjectProfitLossDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ReportBuilderForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ReversePayrollForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\RolePermissionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\SalaryForecastForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\SalarySettingsForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\SettlementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\StatementPrintForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\SupplementaryInsuranceManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TafsiliManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TafsiliSelectionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahDetailForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahListEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahPerformanceReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahPrintForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahRowEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahTransferForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\UnbilledExpensesForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\UnpaidChecksDetailForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\UserManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\YearEndBonusForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+  </ItemGroup>
+</Project>
