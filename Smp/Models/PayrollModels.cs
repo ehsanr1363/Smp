@@ -1,80 +1,91 @@
 ﻿using System;
 using System.Collections.Generic;
 
-namespace SMP.Models
+namespace Smp.Models;
+
+public class PayrollConfig
 {
-    public class PayrollConfig
-    {
-        public decimal MinimumDailyWage { get; set; }
-        public decimal InsuranceMaxDailyWage { get; set; }
-        public decimal EmployeeInsuranceRate { get; set; }
-        public decimal HousingAllowance { get; set; }
-        public decimal GroceryAllowance { get; set; }
-        public decimal ChildAllowance { get; set; }
-        public decimal TaxExemptionLimit { get; set; }
-    }
+    public decimal MinimumDailyWage { get; set; }
+    public decimal InsuranceMaxDailyWage { get; set; }
+    public decimal EmployeeInsuranceRate { get; set; }
+    public decimal HousingAllowance { get; set; }
+    public decimal GroceryAllowance { get; set; }
+    public decimal ChildAllowance { get; set; }
+    public decimal TaxExemptionLimit { get; set; }
+}
 
-    public class TaxBracketDto
-    {
-        public decimal FromAmount { get; set; }
-        public decimal? ToAmount { get; set; }
-        public decimal TaxRate { get; set; }
-    }
+public class TaxBracketDto
+{
+    public decimal FromAmount { get; set; }
+    public decimal? ToAmount { get; set; }
+    public decimal TaxRate { get; set; }
+}
 
-    public class PayslipResult
-    {
-        public decimal BaseSalary { get; set; }
-        public decimal OvertimePay { get; set; }
-        public decimal Benefits { get; set; }
-        public decimal GrossSalary => BaseSalary + OvertimePay + Benefits;
+public class PayslipResult
+{
+    public decimal BaseSalary { get; set; }
+    public decimal OvertimePay { get; set; }
+    public decimal Benefits { get; set; }
+    public decimal GrossSalary => BaseSalary + OvertimePay + Benefits;
 
-        public decimal InsuranceEmployeeShare { get; set; }
-        public decimal IncomeTax { get; set; }
-        public decimal OtherDeductions { get; set; }
+    public decimal InsuranceEmployeeShare { get; set; }
+    public decimal IncomeTax { get; set; }
+    public decimal OtherDeductions { get; set; }
 
-        public decimal NetPay => GrossSalary - (InsuranceEmployeeShare + IncomeTax + OtherDeductions);
-    }
+    public decimal NetPay => GrossSalary - (InsuranceEmployeeShare + IncomeTax + OtherDeductions);
+}
 
-    public class PayrollResult
-    {
-        public int EmployeeId { get; set; }
-        public string EmployeeName { get; set; } = "";
-        public string PersonnelCode { get; set; } = "";
-        public int Year { get; set; }
-        public int Month { get; set; }
+public class PayrollResult
+{
+    public int EmployeeId { get; set; }
+    public string EmployeeName { get; set; } = "";
+    public string PersonnelCode { get; set; } = "";
+    public int Year { get; set; }
+    public int Month { get; set; }
 
-        public string PersonnelType { get; set; } = "";
-        public decimal DailyWage { get; set; }
-        public decimal HourlyWage { get; set; }
+    public string PersonnelType { get; set; } = "";
+    public decimal DailyWage { get; set; }
+    public decimal HourlyWage { get; set; }
 
-        // 👇 تفکیک کامل مزایا 👇
-        public decimal BaseSalary { get; set; }
-        public decimal YearsBonus { get; set; }
-        public decimal HousingAllowance { get; set; }
-        public decimal GroceryAllowance { get; set; }
-        public decimal ChildAllowance { get; set; }
-        public decimal AttractionAllowance { get; set; }
-        public decimal ResponsibilityAllowance { get; set; }
-        public decimal ManagementAllowance { get; set; }
-        public decimal TechnicalAllowance { get; set; }
-        public decimal MarriageAllowance { get; set; }
-        public decimal TransportationAllowance { get; set; }
-        public decimal OtherAllowances { get; set; }
+    // 👇 تفکیک کامل مزایا 👇
+    public decimal BaseSalary { get; set; }
+    public decimal YearsBonus { get; set; }
+    public decimal HousingAllowance { get; set; }
+    public decimal GroceryAllowance { get; set; }
+    public decimal ChildAllowance { get; set; }
+    public decimal AttractionAllowance { get; set; }
+    public decimal ResponsibilityAllowance { get; set; }
+    public decimal ManagementAllowance { get; set; }
+    public decimal TechnicalAllowance { get; set; }
+    public decimal MarriageAllowance { get; set; }
+    public decimal TransportationAllowance { get; set; }
+    public decimal OtherAllowances { get; set; }
 
-        public decimal OvertimePay { get; set; }
-        public decimal TotalEarnings { get; set; }
+    public decimal OvertimePay { get; set; }
+    public decimal TotalEarnings { get; set; }
 
-        // کسورات
-        public decimal AbsenceDeduction { get; set; }
-        public decimal InsuranceEmployee { get; set; }
-        public decimal InsuranceEmployer { get; set; }
-        public decimal IncomeTax { get; set; }
-        public decimal LoanDeduction { get; set; }
-        public decimal SupplementaryInsuranceDeduction { get; set; }
-        public decimal CarInsuranceDeduction { get; set; }
-        public decimal OtherDeductions { get; set; }
+    // ✅ فاز ۲: مبناها و کارکرد (برای فیش، لیست و گزارش‌های رسمی)
+    public decimal InsuranceBase { get; set; }   // مبلغ مشمول بیمه (بعد از سقف)
+    public decimal TaxableBase { get; set; }     // مبلغ مشمول مالیات ماهانه
+    public decimal WorkingDays { get; set; }     // روزهای کارکرد (مبنای ۳۰ روز)
+    public decimal OvertimeHours { get; set; }   // ساعت اضافه‌کار
+    public decimal AbsenceHours { get; set; }    // ساعت کسر کار
 
-        public decimal TotalDeductions { get; set; }
-        public decimal NetPay { get; set; }
-    }
+    // کسورات
+    public decimal AbsenceDeduction { get; set; }
+    public decimal InsuranceEmployee { get; set; }
+    public decimal InsuranceEmployer { get; set; }
+    public decimal IncomeTax { get; set; }
+    public decimal LoanDeduction { get; set; }       // قسط وام (بدون مساعده)
+    public decimal AdvanceDeduction { get; set; }    // کسر مساعده (جدا از وام)
+    public decimal SupplementaryInsuranceDeduction { get; set; }
+    public decimal CarInsuranceDeduction { get; set; }
+    public decimal OtherDeductions { get; set; }
+
+    public decimal TotalDeductions { get; set; }
+    public decimal NetPay { get; set; }
+
+    // 👇 این دو خط نباید حذف شوند 👇
+    public bool IsSaved { get; set; }
+    public string StatusText => IsSaved ? "ذخیره‌شده" : "محاسبه‌شده (ذخیره‌نشده)";
 }

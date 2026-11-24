@@ -1,239 +1,380 @@
-﻿using SMP.Data;
-using SMP.Helpers;
-using SMP.Models;
+﻿using Smp.Helpers;
+using Smp.Models;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
-using System.Linq;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class PayslipForm : Form
 {
-    public class PayslipForm : Form
+    private readonly PayrollResult _payroll;
+    private Panel mainPanel = null!;          // «برگه‌ی فیش» — همین پنل چاپ می‌شود
+    private Bitmap? _memoryImage;
+    private ModernButton btnPrint = null!, btnClose = null!;
+
+    private static readonly Color PositiveText = ModernPaint.Darken(ModernTheme.Success, 70);
+
+    public PayslipForm(PayrollResult payroll)
     {
-        private readonly PayrollResult _payroll;
-        private Panel mainPanel = null!;
-        private Bitmap? _memoryImage;
-        private Button btnPrint = null!;
+        _payroll = payroll;
 
-        public PayslipForm(PayrollResult payroll)
+        BuildUI();
+
+        this.ApplyStandardHeader($"فیش حقوقی - {payroll.EmployeeName}", new Size(880, 800));
+        StartPosition = FormStartPosition.CenterParent;
+        ShowInTaskbar = false;
+        CancelButton = btnClose;
+
+        ShortcutHelper.ApplyStandardShortcuts(this, btnSave: btnPrint);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  رابط کاربری
+    // ═══════════════════════════════════════════════════════════
+    private void BuildUI()
+    {
+        // زمینه‌ی اسکرول‌دار + برگه‌ی سفید فیش
+        var scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = ModernTheme.Background, Padding = new Padding(24, 20, 24, 20) };
+
+        mainPanel = new Panel
         {
-            _payroll = payroll;
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Color.White,
+            Padding = new Padding(28, 22, 28, 24)
+        };
+        mainPanel.Paint += (s, e) =>
+        {
+            using var pen = new Pen(ModernTheme.Border, 1f);
+            e.Graphics.DrawRectangle(pen, 0, 0, mainPanel.Width - 1, mainPanel.Height - 1);
+        };
 
-            BuildUI();
+        // ترتیب افزودن: آخرین کنترل Dock=Top بالاترین جا را می‌گیرد؛ پس از پایین به بالا اضافه می‌کنیم
+        mainPanel.Controls.Add(BuildWordsLabel());
+        mainPanel.Controls.Add(BuildNetBanner());
+        mainPanel.Controls.Add(Spacer(14));
+        mainPanel.Controls.Add(BuildTable());
+        mainPanel.Controls.Add(Spacer(16));
+        mainPanel.Controls.Add(BuildHeader());
 
-            // تنظیم سایز فرم به صورت فشرده تا فضای خالی نماند
-            UIHelper.SetupForm(this, $"فیش حقوقی - {payroll.EmployeeName}", new Size(850, 720));
-            ShowInTaskbar = false;
+        scrollPanel.Controls.Add(mainPanel);
 
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave: btnPrint);
+        // نوار دکمه‌ها
+        btnPrint = ModernButton.Create("🖨️ چاپ فیش حقوقی", ModernTheme.Primary, 200, 40);
+        btnPrint.Click += BtnPrint_Click;
 
-            Shown += async (s, e) => await LoadLogoAsync();
+        btnClose = ModernButton.Cancel("بستن", 110, 40);
+        btnClose.DialogResult = DialogResult.Cancel;
+
+        var bar = ModernForm.CreateButtonBar(btnPrint, btnClose);
+        bar.Dock = DockStyle.Bottom;
+        bar.Height = 64;
+        bar.Paint += (s, e) =>
+        {
+            using var pen = new Pen(ModernTheme.Border, 1f);
+            e.Graphics.DrawLine(pen, 0, 0, bar.Width, 0);
+        };
+
+        Controls.Add(scrollPanel);   // Fill
+        Controls.Add(bar);           // Bottom
+    }
+
+    private static Panel Spacer(int height) => new Panel { Dock = DockStyle.Top, Height = height, BackColor = Color.Transparent };
+
+    /// <summary>سربرگ برگه: لوگو + نام شرکت + عنوان سند، با خط رنگی زیر آن</summary>
+    private Control BuildHeader()
+    {
+        var header = new BufferedTable { Dock = DockStyle.Top, Height = 84, ColumnCount = 2, RowCount = 2, BackColor = Color.White, Padding = new Padding(0, 0, 0, 6) };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92F));   // ستون ۰ = راست
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 55F));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 45F));
+        header.Paint += (s, e) =>
+        {
+            using var pen = new Pen(ModernTheme.Primary, 2f);
+            e.Graphics.DrawLine(pen, 0, header.Height - 2, header.Width, header.Height - 2);
+        };
+
+        var pic = new PictureBox
+        {
+            Dock = DockStyle.Fill,
+            SizeMode = PictureBoxSizeMode.Zoom,
+            BackColor = Color.White,
+            Margin = new Padding(0, 0, 10, 0),
+            Image = ModernForm.GetCompanyLogo()
+        };
+        header.Controls.Add(pic, 0, 0);
+        header.SetRowSpan(pic, 2);
+
+        header.Controls.Add(new Label
+        {
+            Text = "شرکت مهندسی ستاوند شمس",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.BottomLeft,   // فرم Mirror: «چپ» یعنی کنار لوگو در سمت راست
+            Font = ModernTheme.GetFont(15f, FontStyle.Bold),
+            ForeColor = ModernTheme.TextStrong,
+            BackColor = Color.White,
+            Margin = Padding.Empty
+        }, 1, 0);
+
+        header.Controls.Add(new Label
+        {
+            Text = "فیش حقوق و مزایای ماهانه",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = ModernTheme.GetFont(12f, FontStyle.Bold),
+            ForeColor = ModernTheme.Primary,
+            BackColor = Color.White,
+            Margin = Padding.Empty
+        }, 1, 1);
+
+        return header;
+    }
+
+    /// <summary>
+    /// جدول اصلی. خطوط جدول همان رنگ زمینه‌ی خود جدول است که از لابه‌لای حاشیه‌ی ۱ پیکسلی سلول‌ها دیده می‌شود
+    /// (هیچ نقاشی دستی لازم نیست، پس در فرم Mirror و هنگام چاپ هم دقیق می‌ماند).
+    /// </summary>
+    private Control BuildTable()
+    {
+        var layout = new BufferedTable
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 4,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = ModernTheme.InputBorder,
+            Padding = new Padding(1, 1, 0, 0)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+
+        int row = 0;
+
+        // ── ردیف اطلاعات پرسنل ──
+        AddRow(layout, 32F);
+        layout.Controls.Add(Cell($"نام: {_payroll.EmployeeName}", ModernTheme.SurfaceMuted, label: true, bold: true), 0, row);
+        layout.Controls.Add(Cell($"کد: {_payroll.PersonnelCode}", ModernTheme.SurfaceMuted, label: true), 1, row);
+        layout.Controls.Add(Cell($"ماه: {TranslationHelper.GetMonthName(_payroll.Month)}", ModernTheme.SurfaceMuted, label: true), 2, row);
+        layout.Controls.Add(Cell($"سال: {StringHelper.ConvertToPersianDigits(_payroll.Year.ToString())}", ModernTheme.SurfaceMuted, label: true), 3, row);
+        row++;
+
+        // ── هدر ستون‌ها ──
+        AddRow(layout, 34F);
+        layout.Controls.Add(Header("شرح مزایا"), 0, row);
+        layout.Controls.Add(Header("مبلغ (ریال)"), 1, row);
+        layout.Controls.Add(Header("شرح کسورات"), 2, row);
+        layout.Controls.Add(Header("مبلغ (ریال)"), 3, row);
+        row++;
+
+        // ── داده‌ها ──
+        var benefits = new List<(string Name, decimal Amount)>
+        {
+            ("حقوق پایه", _payroll.BaseSalary),
+            ("پایه سنوات", _payroll.YearsBonus),
+            ("حق مسکن", _payroll.HousingAllowance),
+            ("حق خواربار", _payroll.GroceryAllowance),
+            ("حق اولاد", _payroll.ChildAllowance),
+            ("حق تاهل", _payroll.MarriageAllowance),
+            ("حق جذب", _payroll.AttractionAllowance),
+            ("حق مسئولیت", _payroll.ResponsibilityAllowance),
+            ("حق مدیریت", _payroll.ManagementAllowance),
+            ("حق فنی", _payroll.TechnicalAllowance),
+            ("حق ایاب و ذهاب", _payroll.TransportationAllowance),
+            ("سایر مزایا", _payroll.OtherAllowances),
+            ("اضافه‌کاری", _payroll.OvertimePay)
+        };
+
+        var deductions = new List<(string Name, decimal Amount)>
+        {
+            ("بیمه سهم کارمند", _payroll.InsuranceEmployee),
+            ("مالیات بر درآمد", _payroll.IncomeTax),
+            ("کسر وام", _payroll.LoanDeduction),
+            ("کسر مساعده", _payroll.AdvanceDeduction),
+            ("بیمه تکمیلی", _payroll.SupplementaryInsuranceDeduction),
+            ("بیمه خودرو", _payroll.CarInsuranceDeduction),
+            ("سایر کسورات", _payroll.OtherDeductions)
+        };
+
+        int maxRows = Math.Max(benefits.Count, deductions.Count);
+        for (int i = 0; i < maxRows; i++)
+        {
+            AddRow(layout, 30F);
+            Color back = i % 2 == 1 ? ModernTheme.SurfaceAlt : Color.White;
+
+            if (i < benefits.Count)
+            {
+                layout.Controls.Add(Cell(benefits[i].Name, back, label: true), 0, row);
+                layout.Controls.Add(Amount(benefits[i].Amount, back), 1, row);
+            }
+            else
+            {
+                layout.Controls.Add(Cell("", back), 0, row);
+                layout.Controls.Add(Cell("", back), 1, row);
+            }
+
+            if (i < deductions.Count)
+            {
+                layout.Controls.Add(Cell(deductions[i].Name, back, label: true), 2, row);
+                layout.Controls.Add(Amount(deductions[i].Amount, back), 3, row);
+            }
+            else
+            {
+                layout.Controls.Add(Cell("", back), 2, row);
+                layout.Controls.Add(Cell("", back), 3, row);
+            }
+            row++;
         }
 
-        private void BuildUI()
+        // ── جمع کل ──
+        AddRow(layout, 38F);
+        layout.Controls.Add(Cell("جمع مزایا", ModernTheme.SuccessSoft, label: true, bold: true, color: PositiveText), 0, row);
+        layout.Controls.Add(Cell(Fmt(_payroll.TotalEarnings), ModernTheme.SuccessSoft, bold: true, color: PositiveText), 1, row);
+        layout.Controls.Add(Cell("جمع کسورات", ModernTheme.DangerSoft, label: true, bold: true, color: ModernTheme.DangerText), 2, row);
+        layout.Controls.Add(Cell(Fmt(_payroll.TotalDeductions), ModernTheme.DangerSoft, bold: true, color: ModernTheme.DangerText), 3, row);
+
+        return layout;
+    }
+
+    private Control BuildNetBanner() => new RoundedBanner
+    {
+        Dock = DockStyle.Top,
+        Height = 56,
+        Text = $"خالص پرداختی: {Fmt(_payroll.NetPay)} ریال",
+        Fill = ModernTheme.Success,
+        ForeColor = Color.White,
+        TextFont = ModernTheme.GetFont(14f, FontStyle.Bold)
+    };
+
+    private Control BuildWordsLabel() => new Label
+    {
+        Text = $"مبلغ قابل پرداخت به حروف: {NumberHelper.ToPersianWords(_payroll.NetPay)} ریال",
+        Dock = DockStyle.Top,
+        Height = 56,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Font = ModernTheme.GetFont(11f, FontStyle.Bold),
+        ForeColor = ModernTheme.Text,
+        BackColor = Color.White,
+        Padding = new Padding(4, 8, 4, 0)
+    };
+
+    // ── ابزارهای ساخت سلول ──
+    private static string Fmt(decimal v) => NumberHelper.FormatThousands(v, usePersianDigits: true);
+
+    private static void AddRow(TableLayoutPanel t, float height)
+    {
+        t.RowCount++;
+        t.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+    }
+
+    /// <summary>label=true: متن راست‌چین (ستون‌های شرح)؛ در غیر این صورت وسط‌چین</summary>
+    private static Label Cell(string text, Color back, bool label = false, bool bold = false, Color? color = null) => new Label
+    {
+        Text = text,
+        Dock = DockStyle.Fill,
+        // فرم Mirror شده: MiddleLeft یعنی متن در سمت راست سلول
+        TextAlign = label ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleCenter,
+        Font = ModernTheme.GetFont(10.5f, bold ? FontStyle.Bold : FontStyle.Regular),
+        ForeColor = color ?? ModernTheme.Text,
+        BackColor = back,
+        Margin = new Padding(0, 0, 1, 1),
+        Padding = new Padding(8, 0, 8, 0)
+    };
+
+    private static Label Header(string text) => new Label
+    {
+        Text = text,
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleCenter,
+        Font = ModernTheme.GetFont(10.5f, FontStyle.Bold),
+        ForeColor = ModernTheme.GridHeaderText,
+        BackColor = ModernTheme.GridHeaderBack,
+        Margin = new Padding(0, 0, 1, 1)
+    };
+
+    /// <summary>مبلغ صفر کم‌رنگ نشان داده می‌شود تا ردیف‌های پرمقدار بهتر دیده شوند</summary>
+    private static Label Amount(decimal value, Color back)
+        => Cell(Fmt(value), back, color: value == 0 ? ModernTheme.TextDisabled : ModernTheme.TextStrong);
+
+    // ═══════════════════════════════════════════════════════════
+    //  چاپ
+    // ═══════════════════════════════════════════════════════════
+    private void BtnPrint_Click(object? sender, EventArgs e)
+    {
+        try
         {
-            var btnPrintPanel = new Panel { Dock = DockStyle.Top, Height = 50, Padding = new Padding(10) };
-            btnPrint = UIHelper.CreateButton("🖨️ چاپ فیش حقوقی", UIHelper.SectionBlue, 180, 35);
-            btnPrint.Dock = DockStyle.Right;
-            btnPrint.Click += BtnPrint_Click;
-            btnPrintPanel.Controls.Add(btnPrint);
+            _memoryImage?.Dispose();
+            _memoryImage = new Bitmap(mainPanel.Width, mainPanel.Height);
+            mainPanel.DrawToBitmap(_memoryImage, new Rectangle(0, 0, mainPanel.Width, mainPanel.Height));
 
-            // استفاده از AutoScroll برای مواقعی که پنجره کوچک می‌شود
-            var scrollPanel = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.White, Padding = new Padding(20) };
-            mainPanel = new Panel { Dock = DockStyle.Top, AutoSize = true, BackColor = Color.White };
+            using var pd = new PrintDocument();
+            pd.PrintPage += PrintPage;
+            pd.DefaultPageSettings.Landscape = false;
 
-            // هدر فیش
-            var headerPanel = new Panel { Dock = DockStyle.Top, Height = 80 };
-            var lblCompany = new Label { Text = "شرکت مهندسی ستاوند شمس", Font = UIHelper.PersianFont(14f, FontStyle.Bold), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, Height = 30, ForeColor = Color.Black };
-            var lblDocTitle = new Label { Text = "فیش حقوق و مزایای ماهانه", Font = UIHelper.PersianFont(16f, FontStyle.Bold), ForeColor = UIHelper.SectionBlue, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
-            headerPanel.Controls.Add(lblDocTitle);
-            headerPanel.Controls.Add(lblCompany);
+            ModernPrint.ShowPreview(pd, "پیش‌نمایش چاپ فیش حقوقی");
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "PayslipForm.BtnPrint");
+            ModernMessageBox.ShowError("خطا در آماده‌سازی چاپ:\n" + ex.Message);
+        }
+    }
 
-            // جدول اصلی
-            var layout = new TableLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                ColumnCount = 4,
-                AutoSize = true,
-                CellBorderStyle = TableLayoutPanelCellBorderStyle.Single
-            };
+    private void PrintPage(object sender, PrintPageEventArgs e)
+    {
+        if (_memoryImage is not null)
+        {
+            int x = e.MarginBounds.X;
+            int y = e.MarginBounds.Y;
+            int width = e.MarginBounds.Width;
+            int height = (int)((float)width * _memoryImage.Height / _memoryImage.Width);
 
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            e.Graphics?.DrawImage(_memoryImage, x, y, width, height);
+        }
+    }
 
-            // ردیف 1: اطلاعات پرسنل
-            layout.RowCount++;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
-            layout.Controls.Add(new Label { Text = $"نام: {_payroll.EmployeeName}", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(5, 0, 5, 0) }, 0, 0);
-            layout.Controls.Add(new Label { Text = $"کد: {_payroll.PersonnelCode}", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(5, 0, 5, 0) }, 1, 0);
-            layout.SetColumnSpan(layout.GetControlFromPosition(1, 0)!, 1);
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _memoryImage?.Dispose();
+        base.Dispose(disposing);
+    }
 
-            layout.Controls.Add(new Label { Text = $"ماه: {TranslationHelper.GetMonthName(_payroll.Month)}", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(5, 0, 5, 0) }, 2, 0);
-            layout.Controls.Add(new Label { Text = $"سال: {StringHelper.ConvertToPersianDigits(_payroll.Year.ToString())}", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(5, 0, 5, 0) }, 3, 0);
+    // ═══════════════════════════════════════════════════════════
+    //  بنر گوشه‌گرد (خالص پرداختی)
+    // ═══════════════════════════════════════════════════════════
+    private sealed class RoundedBanner : Control
+    {
+        public Color Fill { get; set; } = ModernTheme.Success;
+        public Font TextFont { get; set; } = ModernTheme.GetFont(13f, FontStyle.Bold);
 
-            // ردیف 2: هدر جدول
-            layout.RowCount++;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
-            layout.Controls.Add(new Label { Text = "شرح مزایا", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(245, 245, 245) }, 0, 1);
-            layout.Controls.Add(new Label { Text = "مبلغ (ریال)", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(245, 245, 245) }, 1, 1);
-            layout.Controls.Add(new Label { Text = "شرح کسورات", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(245, 245, 245) }, 2, 1);
-            layout.Controls.Add(new Label { Text = "مبلغ (ریال)", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(245, 245, 245) }, 3, 1);
-
-            // داده‌ها
-            var benefits = new List<(string Name, decimal Amount)>
-            {
-                ("حقوق پایه", _payroll.BaseSalary),
-                ("پایه سنوات", _payroll.YearsBonus),
-                ("حق مسکن", _payroll.HousingAllowance),
-                ("حق خواربار", _payroll.GroceryAllowance),
-                ("حق اولاد", _payroll.ChildAllowance),
-                ("حق تاهل", _payroll.MarriageAllowance),
-                ("حق جذب", _payroll.AttractionAllowance),
-                ("حق مسئولیت", _payroll.ResponsibilityAllowance),
-                ("حق مدیریت", _payroll.ManagementAllowance),
-                ("حق فنی", _payroll.TechnicalAllowance),
-                ("حق ایاب و ذهاب", _payroll.TransportationAllowance),
-                ("سایر مزایا", _payroll.OtherAllowances),
-                ("اضافه‌کاری", _payroll.OvertimePay)
-            };
-
-            var deductions = new List<(string Name, decimal Amount)>
-            {
-                ("بیمه سهم کارمند", _payroll.InsuranceEmployee),
-                ("مالیات بر درآمد", _payroll.IncomeTax),
-                ("کسر وام", _payroll.LoanDeduction),
-                ("بیمه تکمیلی", _payroll.SupplementaryInsuranceDeduction),
-                ("بیمه خودرو", _payroll.CarInsuranceDeduction),
-                ("سایر کسورات", _payroll.OtherDeductions)
-            };
-
-            int maxRows = Math.Max(benefits.Count, deductions.Count);
-            for (int i = 0; i < maxRows; i++)
-            {
-                layout.RowCount++;
-                int row = i + 2;
-                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-
-                if (i < benefits.Count)
-                {
-                    layout.Controls.Add(new Label { Text = benefits[i].Name, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(5, 0, 5, 0) }, 0, row);
-                    layout.Controls.Add(new Label { Text = NumberHelper.FormatThousands(benefits[i].Amount, usePersianDigits: true), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter }, 1, row);
-                }
-
-                if (i < deductions.Count)
-                {
-                    layout.Controls.Add(new Label { Text = deductions[i].Name, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(5, 0, 5, 0) }, 2, row);
-                    layout.Controls.Add(new Label { Text = NumberHelper.FormatThousands(deductions[i].Amount, usePersianDigits: true), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter }, 3, row);
-                }
-            }
-
-            // جمع کل
-            layout.RowCount++;
-            int totalRow = maxRows + 2;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 35F));
-            layout.Controls.Add(new Label { Text = "جمع مزایا", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(240, 253, 244), Padding = new Padding(5, 0, 5, 0) }, 0, totalRow);
-            layout.Controls.Add(new Label { Text = NumberHelper.FormatThousands(_payroll.TotalEarnings, usePersianDigits: true), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(240, 253, 244) }, 1, totalRow);
-            layout.Controls.Add(new Label { Text = "جمع کسورات", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(254, 242, 242), Padding = new Padding(5, 0, 5, 0) }, 2, totalRow);
-            layout.Controls.Add(new Label { Text = NumberHelper.FormatThousands(_payroll.TotalDeductions, usePersianDigits: true), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(11f, FontStyle.Bold), BackColor = Color.FromArgb(254, 242, 242) }, 3, totalRow);
-
-            // خالص پرداختی
-            layout.RowCount++;
-            int netRow = totalRow + 1;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45F));
-            var lblNet = new Label { Text = $"خالص پرداختی: {NumberHelper.FormatThousands(_payroll.NetPay, usePersianDigits: true)} ریال", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(13f, FontStyle.Bold), ForeColor = Color.White, BackColor = UIHelper.ActionGreen };
-            layout.Controls.Add(lblNet, 0, netRow);
-            layout.SetColumnSpan(lblNet, 4);
-
-            // مبلغ به حروف
-            layout.RowCount++;
-            int wordsRow = netRow + 1;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
-            var lblWords = new Label { Text = $"مبلغ قابل پرداخت به حروف: {NumberHelper.ToPersianWords(_payroll.NetPay)} ریال", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Font = UIHelper.PersianFont(11f, FontStyle.Bold), Padding = new Padding(10, 5, 5, 5) };
-            layout.Controls.Add(lblWords, 0, wordsRow);
-            layout.SetColumnSpan(lblWords, 4);
-
-            mainPanel.Controls.Add(layout);
-            mainPanel.Controls.Add(headerPanel);
-            scrollPanel.Controls.Add(mainPanel);
-
-            this.Controls.Add(scrollPanel);
-            this.Controls.Add(btnPrintPanel);
+        public RoundedBanner()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
-        private async Task LoadLogoAsync()
+        protected override void OnPaint(PaintEventArgs e)
         {
-            try
-            {
-                var repo = new CompanyRepository(AppConfig.ConnectionString);
-                var company = await Task.Run(() => repo.GetAll().FirstOrDefault());
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(ModernPaint.BehindColor(this));
 
-                if (company != null && company.Logo != null && company.Logo.Length > 0)
-                {
-                    var picLogo = mainPanel.Controls.Find("picLogo", true).FirstOrDefault() as PictureBox;
-                    if (picLogo != null)
-                        picLogo.Image = ImageHelper.ByteArrayToImage(company.Logo);
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogWarning("خطا در بارگذاری لوگو در فیش حقوقی: " + ex.Message, "PayslipForm");
-            }
-        }
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            if (rect.Width < 12 || rect.Height < 12) return;
+            using (var path = ModernPaint.RoundedRect(rect, ModernTheme.CornerRadius))
+            using (var br = new SolidBrush(Fill))
+                g.FillPath(br, path);
 
-        private void BtnPrint_Click(object? sender, EventArgs e)
-        {
-            try
-            {
-                _memoryImage?.Dispose();
-                _memoryImage = new Bitmap(mainPanel.Width, mainPanel.Height);
-                mainPanel.DrawToBitmap(_memoryImage, new Rectangle(0, 0, mainPanel.Width, mainPanel.Height));
-
-                using var pd = new PrintDocument();
-                pd.PrintPage += PrintPage;
-                pd.DefaultPageSettings.Landscape = false;
-
-                using var previewDialog = new PrintPreviewDialog
-                {
-                    Document = pd,
-                    Width = 900,
-                    Height = 700,
-                    StartPosition = FormStartPosition.CenterScreen,
-                    Text = "پیش‌نمایش چاپ فیش حقوقی",
-                    RightToLeft = RightToLeft.Yes,
-                    RightToLeftLayout = true
-                };
-
-                previewDialog.ShowDialog(this);
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PayslipForm.BtnPrint");
-                ModernMessageBox.ShowError("خطا در آماده‌سازی چاپ:\n" + ex.Message);
-            }
-        }
-
-        private void PrintPage(object sender, PrintPageEventArgs e)
-        {
-            if (_memoryImage != null)
-            {
-                int x = e.MarginBounds.X;
-                int y = e.MarginBounds.Y;
-                int width = e.MarginBounds.Width;
-                int height = (int)((float)width * _memoryImage.Height / _memoryImage.Width);
-
-                e.Graphics?.DrawImage(_memoryImage, x, y, width, height);
-            }
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) _memoryImage?.Dispose();
-            base.Dispose(disposing);
+            TextRenderer.DrawText(g, Text, TextFont, rect, ForeColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix | TextFormatFlags.RightToLeft | TextFormatFlags.EndEllipsis);
         }
     }
 }

@@ -1,687 +1,824 @@
-﻿using DocumentFormat.OpenXml.Office.Word;
-using Microsoft.Data.SqlClient;
-using SMP.Helpers;
-using SMP.Models;
+﻿using Microsoft.Data.SqlClient;
+using Smp.Models;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 
-namespace SMP.Data
+namespace Smp.Data;
+
+public class PayrollRepository
 {
-    public class PayrollRepository
+    private readonly string _connectionString;
+
+    // نام جدول‌ها فقط از این whitelist می‌آید (جلوگیری از SQL Injection در نام جدول)
+    private const string KindLoan = "Loan";
+    private const string KindAdvance = "Advance";   // مساعده: همان جدول EmployeeLoans ولی با LoanType = "مساعده"
+    private const string KindSuppIns = "SuppIns";
+    private const string KindCarIns = "CarIns";
+
+    private static readonly Dictionary<string, string> KindTables = new()
     {
-        private readonly string _connectionString;
+        [KindLoan] = "EmployeeLoans",
+        [KindAdvance] = "EmployeeLoans",
+        [KindSuppIns] = "EmployeeSupplementaryInsurances",
+        [KindCarIns] = "EmployeeCarInsurances"
+    };
 
-        public PayrollRepository(string connectionString)
+    // فیلتر نوع ردیف: «وام» = هر چیزی جز مساعده، «مساعده» = فقط LoanType = مساعده
+    private static readonly Dictionary<string, string> KindFilters = new()
+    {
+        [KindLoan] = " AND ISNULL(LoanType, N'وام') <> N'مساعده'",
+        // مساعده فقط در ماه شروع خودش کسر می‌شود (ماه شروع نامشخص = هر ماه)
+        [KindAdvance] = " AND LoanType = N'مساعده' AND (ISNULL(StartYear, 0) = 0 OR ISNULL(StartMonth, 0) = 0 OR (StartYear = @Y AND StartMonth = @M))"
+    };
+
+    private static bool _logTableEnsured;
+    private static readonly object _logLock = new();
+
+    public PayrollRepository(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    // ==========================================================
+    // متدهای ذخیره‌سازی با قابلیت دریافت ورودی‌های متغیر
+    // ==========================================================
+
+    public async Task SavePayrollsAndDeductInstallmentsAsync(params object[] args)
+    {
+        var (payrolls, year, month) = ExtractPayrollArgs(args);
+        await SavePayrollsAndDeductInstallmentsCoreAsync(payrolls, year, month);
+    }
+
+    public async Task ReSavePayrollsForMonthWithInstallmentRestoreAsync(params object[] args)
+    {
+        var (payrolls, year, month) = ExtractPayrollArgs(args);
+        await ReSavePayrollsForMonthWithInstallmentRestoreCoreAsync(payrolls, year, month);
+    }
+
+    public async Task SavePayrollBatchAsync(List<PayrollResult> payrolls, int year, int month)
+    {
+        await SavePayrollsAndDeductInstallmentsCoreAsync(payrolls, year, month);
+        Smp.Helpers.AuditHelper.Log("ثبت", "پردازش حقوق", $"{payrolls.Count} نفر، سال {year} ماه {month}");
+    }
+
+    // ==========================================================
+    // جدول لاگ اقساط: دقیقاً ثبت می‌کند هر فیش چقدر از کدام ردیف وام/بیمه کم کرده
+    // تا برگشت (ذخیره مجدد / حذف فیش) دقیق و بدون دوبار-کسر انجام شود.
+    // ==========================================================
+
+    private async Task EnsureLogTableAsync()
+    {
+        if (_logTableEnsured) return;
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        const string sql = @"
+                IF OBJECT_ID(N'dbo.PayrollInstallmentLog', N'U') IS NULL
+                BEGIN
+                    CREATE TABLE dbo.PayrollInstallmentLog (
+                        Id         INT IDENTITY(1,1) PRIMARY KEY,
+                        [Year]     INT           NOT NULL,
+                        [Month]    INT           NOT NULL,
+                        EmployeeId INT           NOT NULL,
+                        Kind       NVARCHAR(20)  NOT NULL,
+                        RowId      INT           NOT NULL,
+                        Amount     DECIMAL(18,2) NOT NULL
+                    );
+                    CREATE INDEX IX_PayrollInstallmentLog_Period
+                        ON dbo.PayrollInstallmentLog ([Year], [Month], EmployeeId);
+                END";
+        using (var cmd = new SqlCommand(sql, conn))
+            await cmd.ExecuteNonQueryAsync();
+
+        // ستون جدید «کسر مساعده» (جدا از وام) + انتقال داده‌های قدیمی
+        bool advanceColAdded;
+        using (var chk = new SqlCommand(
+            "SELECT CASE WHEN COL_LENGTH(N'dbo.Payrolls', N'AdvanceDeduction') IS NULL THEN 1 ELSE 0 END", conn))
+            advanceColAdded = Convert.ToInt32(await chk.ExecuteScalarAsync()) == 1;
+
+        if (advanceColAdded)
         {
-            _connectionString = connectionString;
+            using (var add = new SqlCommand(
+                "ALTER TABLE dbo.Payrolls ADD AdvanceDeduction DECIMAL(18,2) NOT NULL " +
+                "CONSTRAINT DF_Payrolls_AdvanceDeduction DEFAULT 0;", conn))
+                await add.ExecuteNonQueryAsync();
+
+            // فیش‌های قبلی: بخشی از «قسط وام» که در واقع مساعده بوده از روی لاگ جدا می‌شود
+            const string migrate = @"
+                UPDATE l SET l.Kind = N'Advance'
+                FROM dbo.PayrollInstallmentLog l
+                INNER JOIN dbo.EmployeeLoans el ON el.Id = l.RowId
+                WHERE l.Kind = N'Loan' AND el.LoanType = N'مساعده';
+
+                UPDATE p SET
+                    p.AdvanceDeduction = x.Amt,
+                    p.LoanDeduction = CASE WHEN p.LoanDeduction - x.Amt < 0 THEN 0 ELSE p.LoanDeduction - x.Amt END
+                FROM dbo.Payrolls p
+                INNER JOIN (SELECT [Year], [Month], EmployeeId, SUM(Amount) AS Amt
+                            FROM dbo.PayrollInstallmentLog
+                            WHERE Kind = N'Advance'
+                            GROUP BY [Year], [Month], EmployeeId) x
+                    ON x.[Year] = p.[Year] AND x.[Month] = p.[Month] AND x.EmployeeId = p.EmployeeId;";
+            using (var mig = new SqlCommand(migrate, conn))
+                await mig.ExecuteNonQueryAsync();
         }
 
-        public async Task<bool> HasPayrollsForMonthAsync(int year, int month)
+        // ستون‌های Payrolls (اگر نبود اضافه می‌شود)
+        string[] columns =
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var cmd = new SqlCommand("SELECT COUNT(1) FROM Payrolls WHERE Year = @Year AND Month = @Month", conn);
-            cmd.Parameters.AddWithValue("@Year", year);
-            cmd.Parameters.AddWithValue("@Month", month);
-            var result = await cmd.ExecuteScalarAsync();
-            return Convert.ToInt32(result) > 0;
+            "SupplementaryInsuranceDeduction", "CarInsuranceDeduction", "OtherDeductions",
+            "OvertimePay", "AbsenceDeduction",
+            "YearsBonus", "HousingAllowance", "GroceryAllowance", "ChildAllowance",
+            "AttractionAllowance", "ResponsibilityAllowance", "ManagementAllowance",
+            "TechnicalAllowance", "MarriageAllowance", "TransportationAllowance",
+            "OtherAllowances", "InsuranceBase", "TaxableBase",
+            "WorkingDays", "OvertimeHours", "AbsenceHours"
+        };
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var c in columns)
+        {
+            sb.AppendLine(
+                $"IF COL_LENGTH(N'dbo.Payrolls', N'{c}') IS NULL " +
+                $"ALTER TABLE dbo.Payrolls ADD {c} DECIMAL(18,2) NOT NULL " +
+                $"CONSTRAINT DF_Payrolls_{c} DEFAULT 0;");
         }
 
-        public async Task SavePayrollsBatchAsync(List<PayrollRecord> payrolls)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
+        using (var cmd2 = new SqlCommand(sb.ToString(), conn))
+            await cmd2.ExecuteNonQueryAsync();
 
-            try
+        lock (_logLock) { _logTableEnsured = true; }
+    }
+
+    // ==========================================================
+    // منطق اصلی (Private Core Methods)
+    // ==========================================================
+
+    private async Task SavePayrollsAndDeductInstallmentsCoreAsync(List<PayrollResult> payrolls, int year, int month)
+    {
+        if (payrolls is null || payrolls.Count == 0) return;
+
+        await EnsureLogTableAsync();
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
+        {
+            foreach (var p in payrolls)
+            {
+                // ✅ FIX: اگر برای این کارمند/ماه قبلاً قسط کم شده، اول برمی‌گردد (ذخیره مجدد = بدون دوبار-کسر)
+                await RestoreLoggedInstallmentsAsync(conn, transaction, year, month, p.EmployeeId);
+
+                await InsertOrUpdatePayrollAsync(conn, transaction, p, year, month);
+                await DeductAndLogInstallmentsAsync(conn, transaction, p, year, month);
+            }
+            await transaction.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            await transaction.RollbackAsync();
+            throw new Exception("خطا در ذخیره حقوق و کسر اقساط: " + ex.Message, ex);
+        }
+    }
+
+    private async Task ReSavePayrollsForMonthWithInstallmentRestoreCoreAsync(List<PayrollResult> payrolls, int year, int month)
+    {
+        await EnsureLogTableAsync();
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
+        {
+            // ۱. برگرداندن همه‌ی اقساطِ کسرشده‌ی این ماه (طبق لاگ)
+            await RestoreLoggedInstallmentsAsync(conn, transaction, year, month, null);
+
+            // ۲. حذف حقوق‌های قبلی این ماه
+            using (var cmdDel = new SqlCommand("DELETE FROM Payrolls WHERE Year = @Year AND Month = @Month", conn, transaction))
+            {
+                cmdDel.Parameters.AddWithValue("@Year", year);
+                cmdDel.Parameters.AddWithValue("@Month", month);
+                await cmdDel.ExecuteNonQueryAsync();
+            }
+
+            // ۳. درج مجدد و کسر اقساط جدید
+            if (payrolls is not null)
             {
                 foreach (var p in payrolls)
                 {
-                    string sql = @"
-                        IF EXISTS (SELECT 1 FROM Payrolls WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month)
-                        BEGIN
-                            UPDATE Payrolls SET 
-                                BaseSalary = @BaseSalary, TotalEarnings = @TotalEarnings, 
-                                TotalDeductions = @TotalDeductions, NetPay = @NetPay,
-                                InsuranceEmployee = @InsuranceEmployee, InsuranceEmployer = @InsuranceEmployer,
-                                IncomeTax = @IncomeTax, LoanDeduction = @LoanDeduction,
-                                SupplementaryInsuranceDeduction = @SupplementaryInsuranceDeduction,
-                                CarInsuranceDeduction = @CarInsuranceDeduction,
-                                OtherDeductions = @OtherDeductions, OvertimePay = @OvertimePay,
-                                AbsenceDeduction = @AbsenceDeduction,
-                                CalculatedAt = GETDATE()
-                            WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month
-                        END
-                        ELSE
-                        BEGIN
-                            INSERT INTO Payrolls 
-                                (EmployeeId, Year, Month, BaseSalary, TotalEarnings, TotalDeductions, NetPay, 
-                                 InsuranceEmployee, InsuranceEmployer, IncomeTax, LoanDeduction, 
-                                 SupplementaryInsuranceDeduction, CarInsuranceDeduction, OtherDeductions, OvertimePay, AbsenceDeduction)
-                            VALUES 
-                                (@EmpId, @Year, @Month, @BaseSalary, @TotalEarnings, @TotalDeductions, @NetPay,
-                                 @InsuranceEmployee, @InsuranceEmployer, @IncomeTax, @LoanDeduction,
-                                 @SupplementaryInsuranceDeduction, @CarInsuranceDeduction, @OtherDeductions, @OvertimePay, @AbsenceDeduction)
-                        END";
-
-                    using var cmd = new SqlCommand(sql, conn, transaction);
-                    cmd.Parameters.AddWithValue("@EmpId", p.EmployeeId);
-                    cmd.Parameters.AddWithValue("@Year", p.Year);
-                    cmd.Parameters.AddWithValue("@Month", p.Month);
-                    cmd.Parameters.AddWithValue("@BaseSalary", p.BaseSalary);
-                    cmd.Parameters.AddWithValue("@TotalEarnings", p.TotalEarnings);
-                    cmd.Parameters.AddWithValue("@TotalDeductions", p.TotalDeductions);
-                    cmd.Parameters.AddWithValue("@NetPay", p.NetPay);
-                    cmd.Parameters.AddWithValue("@InsuranceEmployee", p.InsuranceEmployee);
-                    cmd.Parameters.AddWithValue("@InsuranceEmployer", p.InsuranceEmployer);
-                    cmd.Parameters.AddWithValue("@IncomeTax", p.IncomeTax);
-                    cmd.Parameters.AddWithValue("@LoanDeduction", p.LoanDeduction);
-                    cmd.Parameters.AddWithValue("@SupplementaryInsuranceDeduction", p.SupplementaryInsuranceDeduction);
-                    cmd.Parameters.AddWithValue("@CarInsuranceDeduction", p.CarInsuranceDeduction);
-                    cmd.Parameters.AddWithValue("@OtherDeductions", p.OtherDeductions);
-                    cmd.Parameters.AddWithValue("@OvertimePay", p.OvertimePay);
-                    cmd.Parameters.AddWithValue("@AbsenceDeduction", p.AbsenceDeduction);
-
-                    await cmd.ExecuteNonQueryAsync();
+                    await InsertOrUpdatePayrollAsync(conn, transaction, p, year, month);
+                    await DeductAndLogInstallmentsAsync(conn, transaction, p, year, month);
                 }
-                await transaction.CommitAsync();
             }
-            catch
+
+            await transaction.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            await transaction.RollbackAsync();
+            throw new Exception("خطا در بازسازی حقوق: " + ex.Message, ex);
+        }
+    }
+
+    // ==========================================================
+    // متدهای کمکی
+    // ==========================================================
+
+    private (List<PayrollResult>, int, int) ExtractPayrollArgs(object[] args)
+    {
+        int year = 0, month = 0;
+        List<PayrollResult> payrolls = null;
+
+        foreach (var arg in args)
+        {
+            if (arg is int i)
             {
-                await transaction.RollbackAsync();
-                throw;
+                if (year == 0) year = i;
+                else if (month == 0) month = i;
+            }
+            else if (arg is List<PayrollResult> list)
+            {
+                payrolls = list;
             }
         }
 
-        public async Task SavePayrollsAndDeductInstallmentsAsync(
-            List<PayrollRecord> payrolls,
-            Dictionary<int, decimal> loanDeductions,
-            Dictionary<int, decimal> supplementaryInsuranceDeductions,
-            Dictionary<int, decimal> carInsuranceDeductions)
+        if (payrolls is null || year == 0 || month == 0)
+            throw new ArgumentException("پارامترهای ارسالی به متد نامعتبر هستند (سال، ماه یا لیست حقوق یافت نشد).");
+
+        return (payrolls, year, month);
+    }
+
+    private async Task InsertOrUpdatePayrollAsync(SqlConnection conn, SqlTransaction transaction, PayrollResult p, int year, int month)
+    {
+        string sql = @"
+                IF EXISTS (SELECT 1 FROM Payrolls WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month)
+                BEGIN
+                    UPDATE Payrolls SET 
+                        BaseSalary = @BaseSalary,
+                        TotalEarnings = @TotalEarnings,
+                        TotalDeductions = @TotalDeductions,
+                        NetPay = @NetPay,
+                        InsuranceEmployee = @InsEmp,
+                        InsuranceEmployer = @InsEmpr,
+                        IncomeTax = @Tax,
+                        LoanDeduction = @Loan,
+                        AdvanceDeduction = @Advance,
+                        SupplementaryInsuranceDeduction = @SupIns,
+                        CarInsuranceDeduction = @CarIns,
+                        OtherDeductions = @Other,
+                        OvertimePay = @Overtime,
+                        AbsenceDeduction = @Absence,
+                        YearsBonus = @YearsBonus,
+                        HousingAllowance = @HousingAllowance,
+                        GroceryAllowance = @GroceryAllowance,
+                        ChildAllowance = @ChildAllowance,
+                        AttractionAllowance = @AttractionAllowance,
+                        ResponsibilityAllowance = @ResponsibilityAllowance,
+                        ManagementAllowance = @ManagementAllowance,
+                        TechnicalAllowance = @TechnicalAllowance,
+                        MarriageAllowance = @MarriageAllowance,
+                        TransportationAllowance = @TransportationAllowance,
+                        OtherAllowances = @OtherAllowances,
+                        InsuranceBase = @InsuranceBase,
+                        TaxableBase = @TaxableBase,
+                        WorkingDays = @WorkingDays,
+                        OvertimeHours = @OvertimeHours,
+                        AbsenceHours = @AbsenceHours,
+                        WorkLocation = (SELECT TOP 1 LTRIM(RTRIM(WorkLocation)) FROM Employees WHERE Id = @EmpId),
+                        PersonnelType = (SELECT TOP 1 LTRIM(RTRIM(PersonnelType)) FROM Employees WHERE Id = @EmpId)
+                    WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month
+                END
+                ELSE
+                BEGIN
+                    INSERT INTO Payrolls (
+                        EmployeeId, Year, Month, BaseSalary, TotalEarnings, TotalDeductions, NetPay,
+                        InsuranceEmployee, InsuranceEmployer, IncomeTax, LoanDeduction, AdvanceDeduction,
+                        SupplementaryInsuranceDeduction, CarInsuranceDeduction, OtherDeductions,
+                        OvertimePay, AbsenceDeduction,
+                        YearsBonus, HousingAllowance, GroceryAllowance, ChildAllowance, AttractionAllowance, ResponsibilityAllowance, ManagementAllowance, TechnicalAllowance, MarriageAllowance, TransportationAllowance, OtherAllowances, InsuranceBase, TaxableBase, WorkingDays, OvertimeHours, AbsenceHours,
+                        WorkLocation, PersonnelType
+                    ) VALUES (
+                        @EmpId, @Year, @Month, @BaseSalary, @TotalEarnings, @TotalDeductions, @NetPay,
+                        @InsEmp, @InsEmpr, @Tax, @Loan, @Advance,
+                        @SupIns, @CarIns, @Other,
+                        @Overtime, @Absence,
+                        @YearsBonus, @HousingAllowance, @GroceryAllowance, @ChildAllowance, @AttractionAllowance, @ResponsibilityAllowance, @ManagementAllowance, @TechnicalAllowance, @MarriageAllowance, @TransportationAllowance, @OtherAllowances, @InsuranceBase, @TaxableBase, @WorkingDays, @OvertimeHours, @AbsenceHours,
+                        (SELECT TOP 1 LTRIM(RTRIM(WorkLocation)) FROM Employees WHERE Id = @EmpId),
+                        (SELECT TOP 1 LTRIM(RTRIM(PersonnelType)) FROM Employees WHERE Id = @EmpId)
+                    )
+                END";
+
+        using var cmd = new SqlCommand(sql, conn, transaction);
+        cmd.Parameters.AddWithValue("@EmpId", p.EmployeeId);
+        cmd.Parameters.AddWithValue("@Year", year);
+        cmd.Parameters.AddWithValue("@Month", month);
+        cmd.Parameters.AddWithValue("@BaseSalary", p.BaseSalary);
+        cmd.Parameters.AddWithValue("@TotalEarnings", p.TotalEarnings);
+        cmd.Parameters.AddWithValue("@TotalDeductions", p.TotalDeductions);
+        cmd.Parameters.AddWithValue("@NetPay", p.NetPay);
+        cmd.Parameters.AddWithValue("@InsEmp", p.InsuranceEmployee);
+        cmd.Parameters.AddWithValue("@InsEmpr", p.InsuranceEmployer);
+        cmd.Parameters.AddWithValue("@Tax", p.IncomeTax);
+        cmd.Parameters.AddWithValue("@Loan", p.LoanDeduction);
+        cmd.Parameters.AddWithValue("@Advance", p.AdvanceDeduction);
+        cmd.Parameters.AddWithValue("@SupIns", p.SupplementaryInsuranceDeduction);
+        cmd.Parameters.AddWithValue("@CarIns", p.CarInsuranceDeduction);
+        cmd.Parameters.AddWithValue("@Other", p.OtherDeductions);
+        cmd.Parameters.AddWithValue("@Overtime", p.OvertimePay);
+        cmd.Parameters.AddWithValue("@Absence", p.AbsenceDeduction);
+        cmd.Parameters.AddWithValue("@YearsBonus", p.YearsBonus);
+        cmd.Parameters.AddWithValue("@HousingAllowance", p.HousingAllowance);
+        cmd.Parameters.AddWithValue("@GroceryAllowance", p.GroceryAllowance);
+        cmd.Parameters.AddWithValue("@ChildAllowance", p.ChildAllowance);
+        cmd.Parameters.AddWithValue("@AttractionAllowance", p.AttractionAllowance);
+        cmd.Parameters.AddWithValue("@ResponsibilityAllowance", p.ResponsibilityAllowance);
+        cmd.Parameters.AddWithValue("@ManagementAllowance", p.ManagementAllowance);
+        cmd.Parameters.AddWithValue("@TechnicalAllowance", p.TechnicalAllowance);
+        cmd.Parameters.AddWithValue("@MarriageAllowance", p.MarriageAllowance);
+        cmd.Parameters.AddWithValue("@TransportationAllowance", p.TransportationAllowance);
+        cmd.Parameters.AddWithValue("@OtherAllowances", p.OtherAllowances);
+        cmd.Parameters.AddWithValue("@InsuranceBase", p.InsuranceBase);
+        cmd.Parameters.AddWithValue("@TaxableBase", p.TaxableBase);
+        cmd.Parameters.AddWithValue("@WorkingDays", p.WorkingDays);
+        cmd.Parameters.AddWithValue("@OvertimeHours", p.OvertimeHours);
+        cmd.Parameters.AddWithValue("@AbsenceHours", p.AbsenceHours);
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    // ----------------------------------------------------------
+    // کسر اقساط (ردیف‌به‌ردیف) + ثبت در لاگ
+    // ----------------------------------------------------------
+
+    private async Task DeductAndLogInstallmentsAsync(SqlConnection conn, SqlTransaction transaction, PayrollResult p, int year, int month)
+    {
+        if (p.LoanDeduction > 0)
+            await DeductKindAsync(conn, transaction, year, month, p.EmployeeId, KindLoan, p.LoanDeduction);
+
+        if (p.AdvanceDeduction > 0)
+            await DeductKindAsync(conn, transaction, year, month, p.EmployeeId, KindAdvance, p.AdvanceDeduction);
+
+        if (p.SupplementaryInsuranceDeduction > 0)
+            await DeductKindAsync(conn, transaction, year, month, p.EmployeeId, KindSuppIns, p.SupplementaryInsuranceDeduction);
+
+        if (p.CarInsuranceDeduction > 0)
+            await DeductKindAsync(conn, transaction, year, month, p.EmployeeId, KindCarIns, p.CarInsuranceDeduction);
+    }
+
+    private async Task DeductKindAsync(SqlConnection conn, SqlTransaction transaction,
+        int year, int month, int empId, string kind, decimal amount)
+    {
+        string table = KindTables[kind];
+
+        // ۱. اول همه‌ی ردیف‌ها را بخوان و Reader را ببند (مشکل «open DataReader» بدون MARS)
+        var rows = new List<(int Id, decimal Inst, decimal Rem)>();
+        using (var sel = new SqlCommand(
+            $"SELECT Id, MonthlyInstallment, RemainingAmount FROM {table} " +
+            "WHERE EmployeeId = @EmpId AND IsActive = 1 AND RemainingAmount > 0" +
+            (KindFilters.TryGetValue(kind, out var filter) ? filter : "") + " ORDER BY Id",
+            conn, transaction))
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
-
-            try
+            sel.Parameters.AddWithValue("@EmpId", empId);
+            if (kind == KindAdvance)
             {
-                foreach (var p in payrolls)
-                {
-                    string sql = @"
-                        IF EXISTS (SELECT 1 FROM Payrolls WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month)
-                        BEGIN
-                            UPDATE Payrolls SET 
-                                BaseSalary = @BaseSalary, TotalEarnings = @TotalEarnings, 
-                                TotalDeductions = @TotalDeductions, NetPay = @NetPay,
-                                InsuranceEmployee = @InsuranceEmployee, InsuranceEmployer = @InsuranceEmployer,
-                                IncomeTax = @IncomeTax, LoanDeduction = @LoanDeduction,
-                                SupplementaryInsuranceDeduction = @SupplementaryInsuranceDeduction,
-                                CarInsuranceDeduction = @CarInsuranceDeduction,
-                                OtherDeductions = @OtherDeductions, OvertimePay = @OvertimePay,
-                                AbsenceDeduction = @AbsenceDeduction,
-                                CalculatedAt = GETDATE()
-                            WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month
-                        END
-                        ELSE
-                        BEGIN
-                            INSERT INTO Payrolls 
-                                (EmployeeId, Year, Month, BaseSalary, TotalEarnings, TotalDeductions, NetPay, 
-                                 InsuranceEmployee, InsuranceEmployer, IncomeTax, LoanDeduction, 
-                                 SupplementaryInsuranceDeduction, CarInsuranceDeduction, OtherDeductions, OvertimePay, AbsenceDeduction)
-                            VALUES 
-                                (@EmpId, @Year, @Month, @BaseSalary, @TotalEarnings, @TotalDeductions, @NetPay,
-                                 @InsuranceEmployee, @InsuranceEmployer, @IncomeTax, @LoanDeduction,
-                                 @SupplementaryInsuranceDeduction, @CarInsuranceDeduction, @OtherDeductions, @OvertimePay, @AbsenceDeduction)
-                        END";
-
-                    using var cmd = new SqlCommand(sql, conn, transaction);
-                    cmd.Parameters.AddWithValue("@EmpId", p.EmployeeId);
-                    cmd.Parameters.AddWithValue("@Year", p.Year);
-                    cmd.Parameters.AddWithValue("@Month", p.Month);
-                    cmd.Parameters.AddWithValue("@BaseSalary", p.BaseSalary);
-                    cmd.Parameters.AddWithValue("@TotalEarnings", p.TotalEarnings);
-                    cmd.Parameters.AddWithValue("@TotalDeductions", p.TotalDeductions);
-                    cmd.Parameters.AddWithValue("@NetPay", p.NetPay);
-                    cmd.Parameters.AddWithValue("@InsuranceEmployee", p.InsuranceEmployee);
-                    cmd.Parameters.AddWithValue("@InsuranceEmployer", p.InsuranceEmployer);
-                    cmd.Parameters.AddWithValue("@IncomeTax", p.IncomeTax);
-                    cmd.Parameters.AddWithValue("@LoanDeduction", p.LoanDeduction);
-                    cmd.Parameters.AddWithValue("@SupplementaryInsuranceDeduction", p.SupplementaryInsuranceDeduction);
-                    cmd.Parameters.AddWithValue("@CarInsuranceDeduction", p.CarInsuranceDeduction);
-                    cmd.Parameters.AddWithValue("@OtherDeductions", p.OtherDeductions);
-                    cmd.Parameters.AddWithValue("@OvertimePay", p.OvertimePay);
-                    cmd.Parameters.AddWithValue("@AbsenceDeduction", p.AbsenceDeduction);
-
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                if (loanDeductions != null && loanDeductions.Count > 0)
-                {
-                    foreach (var kv in loanDeductions)
-                    {
-                        if (kv.Value <= 0) continue;
-                        await DeductFromInstallmentTableAsync(conn, transaction, "EmployeeLoans", kv.Key, kv.Value);
-                    }
-                }
-
-                if (supplementaryInsuranceDeductions != null && supplementaryInsuranceDeductions.Count > 0)
-                {
-                    foreach (var kv in supplementaryInsuranceDeductions)
-                    {
-                        if (kv.Value <= 0) continue;
-                        await DeductFromInstallmentTableAsync(conn, transaction, "EmployeeSupplementaryInsurances", kv.Key, kv.Value);
-                    }
-                }
-
-                if (carInsuranceDeductions != null && carInsuranceDeductions.Count > 0)
-                {
-                    foreach (var kv in carInsuranceDeductions)
-                    {
-                        if (kv.Value <= 0) continue;
-                        await DeductFromInstallmentTableAsync(conn, transaction, "EmployeeCarInsurances", kv.Key, kv.Value);
-                    }
-                }
-
-                await transaction.CommitAsync();
+                sel.Parameters.AddWithValue("@Y", year);
+                sel.Parameters.AddWithValue("@M", month);
             }
-            catch
+            using var reader = await sel.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
             {
-                await transaction.RollbackAsync();
-                throw;
+                rows.Add((
+                    reader.GetInt32(0),
+                    reader.IsDBNull(1) ? 0m : reader.GetDecimal(1),
+                    reader.IsDBNull(2) ? 0m : reader.GetDecimal(2)));
             }
         }
 
-        private static async Task DeductFromInstallmentTableAsync(
-            SqlConnection conn, SqlTransaction transaction, string tableName, int employeeId, decimal amountToDeduct)
+        // ۲. به ترتیب Id، از هر ردیف حداکثر «قسط خودش» (و نه بیشتر از مانده) کم کن
+        decimal left = amount;
+        foreach (var row in rows)
         {
-            if (tableName != "EmployeeLoans" && tableName != "EmployeeSupplementaryInsurances" && tableName != "EmployeeCarInsurances")
-                throw new ArgumentException("نام جدول نامعتبر است.", nameof(tableName));
+            if (left <= 0) break;
 
-            string orderColumn = tableName == "EmployeeLoans" ? "LoanDate" : "StartDate";
+            decimal perRow = row.Inst > 0 ? Math.Min(row.Inst, row.Rem) : row.Rem;
+            decimal take = Math.Min(perRow, left);
+            if (take <= 0) continue;
 
-            var itemsToDeduct = new List<(int Id, decimal Remaining)>();
-            string getSql = $@"
-                SELECT Id, RemainingAmount 
-                FROM {tableName}
-                WHERE EmployeeId = @EmpId AND IsActive = 1 AND RemainingAmount > 0
-                ORDER BY {orderColumn} ASC, Id ASC";
-
-            using (var cmdGet = new SqlCommand(getSql, conn, transaction))
+            using (var upd = new SqlCommand(
+                $"UPDATE {table} SET " +
+                "RemainingAmount = RemainingAmount - @Take, " +
+                "IsActive = CASE WHEN RemainingAmount - @Take <= 0 THEN 0 ELSE 1 END " +
+                "WHERE Id = @Id", conn, transaction))
             {
-                cmdGet.Parameters.AddWithValue("@EmpId", employeeId);
-                using var reader = await cmdGet.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    itemsToDeduct.Add((reader.GetInt32(0), reader.GetDecimal(1)));
-                }
+                upd.Parameters.AddWithValue("@Take", take);
+                upd.Parameters.AddWithValue("@Id", row.Id);
+                await upd.ExecuteNonQueryAsync();
             }
 
-            if (itemsToDeduct.Count == 0) return;
-
-            foreach (var (id, remaining) in itemsToDeduct)
+            using (var log = new SqlCommand(
+                "INSERT INTO PayrollInstallmentLog ([Year], [Month], EmployeeId, Kind, RowId, Amount) " +
+                "VALUES (@Y, @M, @E, @K, @R, @A)", conn, transaction))
             {
-                if (amountToDeduct <= 0) break;
-
-                decimal deductFromThis = Math.Min(remaining, amountToDeduct);
-                decimal newRemaining = remaining - deductFromThis;
-                int newIsActive = newRemaining > 0 ? 1 : 0;
-
-                string updateSql = $@"
-                    UPDATE {tableName}
-                    SET RemainingAmount = @NewRemaining,
-                        IsActive = @NewIsActive
-                    WHERE Id = @Id";
-
-                using var cmdUpdate = new SqlCommand(updateSql, conn, transaction);
-                cmdUpdate.Parameters.AddWithValue("@NewRemaining", newRemaining);
-                cmdUpdate.Parameters.AddWithValue("@NewIsActive", newIsActive);
-                cmdUpdate.Parameters.AddWithValue("@Id", id);
-                await cmdUpdate.ExecuteNonQueryAsync();
-
-                amountToDeduct -= deductFromThis;
+                log.Parameters.AddWithValue("@Y", year);
+                log.Parameters.AddWithValue("@M", month);
+                log.Parameters.AddWithValue("@E", empId);
+                log.Parameters.AddWithValue("@K", kind);
+                log.Parameters.AddWithValue("@R", row.Id);
+                log.Parameters.AddWithValue("@A", take);
+                await log.ExecuteNonQueryAsync();
             }
+
+            left -= take;
         }
 
-        public async Task SavePayrollsAndDeductLoansAsync(
-            List<PayrollRecord> payrolls,
-            Dictionary<int, decimal> loanDeductions)
+        // اگر قسط محاسبه‌شده با وام‌های فعال همخوانی نداشت (مثلاً بین محاسبه و ذخیره وام ویرایش شده)
+        // کل تراکنش Rollback شود تا داده ناسازگار ذخیره نشود.
+        if (left > 0.5m)
+            throw new InvalidOperationException(
+                $"قسط محاسبه‌شده برای کارمند (Id={empId}) با اقساط فعال او همخوانی ندارد. لطفاً دوباره «محاسبه» را بزنید.");
+    }
+
+    // ----------------------------------------------------------
+    // برگشت اقساط طبق لاگ (empId = null → همه‌ی کارمندان آن ماه)
+    // ----------------------------------------------------------
+
+    private async Task RestoreLoggedInstallmentsAsync(SqlConnection conn, SqlTransaction transaction,
+        int year, int month, int? empId)
+    {
+        // فیش‌هایی که لاگ اقساطشان ثبت نشده (ذخیره‌شده با نسخه‌های قدیمی) از روی مبلغ خودِ فیش برگردانده می‌شوند
+        await RestoreFromPayrollAmountsWhenNoLogAsync(conn, transaction, year, month, empId);
+
+        var logs = new List<(string Kind, int RowId, decimal Amount)>();
+
+        string selectSql = "SELECT Kind, RowId, Amount FROM PayrollInstallmentLog WHERE [Year] = @Y AND [Month] = @M"
+                           + (empId.HasValue ? " AND EmployeeId = @E" : "");
+
+        using (var sel = new SqlCommand(selectSql, conn, transaction))
         {
-            await SavePayrollsAndDeductInstallmentsAsync(
-                payrolls,
-                loanDeductions,
-                new Dictionary<int, decimal>(),
-                new Dictionary<int, decimal>());
+            sel.Parameters.AddWithValue("@Y", year);
+            sel.Parameters.AddWithValue("@M", month);
+            if (empId.HasValue) sel.Parameters.AddWithValue("@E", empId.Value);
+
+            using var reader = await sel.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                logs.Add((reader.GetString(0), reader.GetInt32(1), reader.GetDecimal(2)));
         }
 
-        public async Task DeletePayrollAsync(int id)
+        foreach (var l in logs)
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
+            if (!KindTables.TryGetValue(l.Kind, out var table)) continue;
 
-            try
-            {
-                int employeeId = 0;
-                decimal loanDed = 0, suppDed = 0, carDed = 0;
-
-                using (var read = new SqlCommand(
-                    @"SELECT EmployeeId, LoanDeduction, SupplementaryInsuranceDeduction, CarInsuranceDeduction 
-                      FROM Payrolls WHERE Id = @Id", conn, transaction))
-                {
-                    read.Parameters.AddWithValue("@Id", id);
-                    using var r = await read.ExecuteReaderAsync();
-                    if (!await r.ReadAsync())
-                    {
-                        transaction.Rollback();
-                        return;
-                    }
-                    employeeId = r.GetInt32(0);
-                    loanDed = r.IsDBNull(1) ? 0 : r.GetDecimal(1);
-                    suppDed = r.IsDBNull(2) ? 0 : r.GetDecimal(2);
-                    carDed = r.IsDBNull(3) ? 0 : r.GetDecimal(3);
-                }
-
-                using (var del = new SqlCommand("DELETE FROM Payrolls WHERE Id = @Id", conn, transaction))
-                {
-                    del.Parameters.AddWithValue("@Id", id);
-                    await del.ExecuteNonQueryAsync();
-                }
-
-                if (loanDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeLoans", employeeId, loanDed);
-                if (suppDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeSupplementaryInsurances", employeeId, suppDed);
-                if (carDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeCarInsurances", employeeId, carDed);
-
-                await transaction.CommitAsync();
-            }
-            catch
-            {
-                await transaction.RollbackAsync();
-                throw;
-            }
+            // مانده هیچ‌وقت از TotalAmount بیشتر نمی‌شود
+            using var upd = new SqlCommand(
+                $"UPDATE {table} SET " +
+                "RemainingAmount = CASE WHEN RemainingAmount + @A > TotalAmount THEN TotalAmount ELSE RemainingAmount + @A END, " +
+                "IsActive = 1 WHERE Id = @Id", conn, transaction);
+            upd.Parameters.AddWithValue("@A", l.Amount);
+            upd.Parameters.AddWithValue("@Id", l.RowId);
+            await upd.ExecuteNonQueryAsync();
         }
 
-        public async Task DeletePayrollsForMonthAsync(int year, int month)
+        string delSql = "DELETE FROM PayrollInstallmentLog WHERE [Year] = @Y AND [Month] = @M"
+                        + (empId.HasValue ? " AND EmployeeId = @E" : "");
+        using (var del = new SqlCommand(delSql, conn, transaction))
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
+            del.Parameters.AddWithValue("@Y", year);
+            del.Parameters.AddWithValue("@M", month);
+            if (empId.HasValue) del.Parameters.AddWithValue("@E", empId.Value);
+            await del.ExecuteNonQueryAsync();
+        }
+    }
 
-            try
-            {
-                var payrolls = new List<(int Id, int EmployeeId, decimal LoanDed, decimal SuppDed, decimal CarDed)>();
-                using (var read = new SqlCommand(
-                    @"SELECT Id, EmployeeId, LoanDeduction, SupplementaryInsuranceDeduction, CarInsuranceDeduction 
-                      FROM Payrolls WHERE Year = @Year AND Month = @Month", conn, transaction))
-                {
-                    read.Parameters.AddWithValue("@Year", year);
-                    read.Parameters.AddWithValue("@Month", month);
-                    using var r = await read.ExecuteReaderAsync();
-                    while (await r.ReadAsync())
-                    {
-                        payrolls.Add((
-                            r.GetInt32(0),
-                            r.GetInt32(1),
-                            r.IsDBNull(2) ? 0 : r.GetDecimal(2),
-                            r.IsDBNull(3) ? 0 : r.GetDecimal(3),
-                            r.IsDBNull(4) ? 0 : r.GetDecimal(4)
-                        ));
-                    }
-                }
-
-                using (var del = new SqlCommand("DELETE FROM Payrolls WHERE Year = @Year AND Month = @Month", conn, transaction))
-                {
-                    del.Parameters.AddWithValue("@Year", year);
-                    del.Parameters.AddWithValue("@Month", month);
-                    await del.ExecuteNonQueryAsync();
-                }
-
-                foreach (var p in payrolls)
-                {
-                    if (p.LoanDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeLoans", p.EmployeeId, p.LoanDed);
-                    if (p.SuppDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeSupplementaryInsurances", p.EmployeeId, p.SuppDed);
-                    if (p.CarDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeCarInsurances", p.EmployeeId, p.CarDed);
-                }
-
-                await transaction.CommitAsync();
-            }
-            catch
-            {
-                await transaction.RollbackAsync();
-                throw;
-            }
+    private async Task RestoreFromPayrollAmountsWhenNoLogAsync(SqlConnection conn, SqlTransaction transaction,
+        int year, int month, int? empId)
+    {
+        var slips = new List<(int EmpId, decimal Loan, decimal Adv)>();
+        using (var sel = new SqlCommand(
+            "SELECT EmployeeId, LoanDeduction, AdvanceDeduction FROM Payrolls " +
+            "WHERE [Year] = @Y AND [Month] = @M" + (empId.HasValue ? " AND EmployeeId = @E" : ""),
+            conn, transaction))
+        {
+            sel.Parameters.AddWithValue("@Y", year);
+            sel.Parameters.AddWithValue("@M", month);
+            if (empId.HasValue) sel.Parameters.AddWithValue("@E", empId.Value);
+            using var reader = await sel.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                slips.Add((reader.GetInt32(0),
+                           reader.IsDBNull(1) ? 0m : reader.GetDecimal(1),
+                           reader.IsDBNull(2) ? 0m : reader.GetDecimal(2)));
         }
 
-        private static async Task RestoreInstallmentAsync(
-            SqlConnection conn, SqlTransaction transaction, string tableName, int employeeId, decimal amountToRestore)
+        foreach (var s in slips)
         {
-            if (tableName != "EmployeeLoans" && tableName != "EmployeeSupplementaryInsurances" && tableName != "EmployeeCarInsurances")
-                throw new ArgumentException("نام جدول نامعتبر است.", nameof(tableName));
+            if (s.Loan > 0 && !await HasLogAsync(conn, transaction, year, month, s.EmpId, KindLoan))
+                await AddBackWithoutLogAsync(conn, transaction, year, month, s.EmpId, KindLoan, s.Loan);
+            if (s.Adv > 0 && !await HasLogAsync(conn, transaction, year, month, s.EmpId, KindAdvance))
+                await AddBackWithoutLogAsync(conn, transaction, year, month, s.EmpId, KindAdvance, s.Adv);
+        }
+    }
 
-            string orderColumn = tableName == "EmployeeLoans" ? "LoanDate" : "StartDate";
+    private static async Task<bool> HasLogAsync(SqlConnection conn, SqlTransaction transaction,
+        int year, int month, int empId, string kind)
+    {
+        using var cmd = new SqlCommand(
+            "SELECT COUNT(1) FROM PayrollInstallmentLog WHERE [Year] = @Y AND [Month] = @M AND EmployeeId = @E AND Kind = @K",
+            conn, transaction);
+        cmd.Parameters.AddWithValue("@Y", year);
+        cmd.Parameters.AddWithValue("@M", month);
+        cmd.Parameters.AddWithValue("@E", empId);
+        cmd.Parameters.AddWithValue("@K", kind);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync()) > 0;
+    }
 
-            string getSql = $@"
-                SELECT Id, RemainingAmount, TotalAmount
-                FROM {tableName}
-                WHERE EmployeeId = @EmpId AND TotalAmount > RemainingAmount
-                ORDER BY IsActive DESC, {orderColumn} DESC, Id DESC";
-
-            var records = new List<(int Id, decimal Remaining, decimal Total)>();
-            using (var cmd = new SqlCommand(getSql, conn, transaction))
-            {
-                cmd.Parameters.AddWithValue("@EmpId", employeeId);
-                using var r = await cmd.ExecuteReaderAsync();
-                while (await r.ReadAsync())
-                {
-                    records.Add((r.GetInt32(0), r.GetDecimal(1), r.GetDecimal(2)));
-                }
-            }
-
-            foreach (var rec in records)
-            {
-                if (amountToRestore <= 0) break;
-
-                decimal space = rec.Total - rec.Remaining;
-                if (space <= 0) continue;
-
-                decimal restore = Math.Min(space, amountToRestore);
-                decimal newRemaining = rec.Remaining + restore;
-
-                string updateSql = $@"
-                    UPDATE {tableName}
-                    SET RemainingAmount = @NewRemaining, IsActive = 1
-                    WHERE Id = @Id";
-                using var cmdUpd = new SqlCommand(updateSql, conn, transaction);
-                cmdUpd.Parameters.AddWithValue("@NewRemaining", newRemaining);
-                cmdUpd.Parameters.AddWithValue("@Id", rec.Id);
-                await cmdUpd.ExecuteNonQueryAsync();
-
-                amountToRestore -= restore;
-            }
+    // فقط ردیف‌هایی که تا آن ماه شروع شده‌اند و مبلغی از آن‌ها کسر شده است، به ترتیب Id برگردانده می‌شوند
+    private async Task AddBackWithoutLogAsync(SqlConnection conn, SqlTransaction transaction,
+        int year, int month, int empId, string kind, decimal amount)
+    {
+        string table = KindTables[kind];
+        var rows = new List<(int Id, decimal Paid)>();
+        using (var sel = new SqlCommand(
+            $"SELECT Id, TotalAmount - RemainingAmount FROM {table} " +
+            "WHERE EmployeeId = @E AND TotalAmount - RemainingAmount > 0 " +
+            "AND (ISNULL(StartYear, 0) = 0 OR StartYear < @Y OR (StartYear = @Y AND StartMonth <= @M))" +
+            (KindFilters.TryGetValue(kind, out var f) ? f : "") + " ORDER BY Id",
+            conn, transaction))
+        {
+            sel.Parameters.AddWithValue("@E", empId);
+            sel.Parameters.AddWithValue("@Y", year);
+            sel.Parameters.AddWithValue("@M", month);
+            using var reader = await sel.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                rows.Add((reader.GetInt32(0), reader.GetDecimal(1)));
         }
 
-        public async Task ReSavePayrollsForMonthWithInstallmentRestoreAsync(
-            int year, int month,
-            List<PayrollRecord> newRecords,
-            Dictionary<int, decimal> newLoanDeductions,
-            Dictionary<int, decimal> newSuppInsDeductions,
-            Dictionary<int, decimal> newCarInsDeductions)
+        decimal left = amount;
+        foreach (var row in rows)
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
-
-            try
-            {
-                var oldPayrolls = new List<(int EmployeeId, decimal LoanDed, decimal SuppDed, decimal CarDed)>();
-                using (var read = new SqlCommand(
-                    @"SELECT EmployeeId, 
-                             ISNULL(LoanDeduction, 0), 
-                             ISNULL(SupplementaryInsuranceDeduction, 0), 
-                             ISNULL(CarInsuranceDeduction, 0)
-                      FROM Payrolls WHERE Year = @Year AND Month = @Month", conn, transaction))
-                {
-                    read.Parameters.AddWithValue("@Year", year);
-                    read.Parameters.AddWithValue("@Month", month);
-                    using var r = await read.ExecuteReaderAsync();
-                    while (await r.ReadAsync())
-                    {
-                        oldPayrolls.Add((
-                            r.GetInt32(0),
-                            r.IsDBNull(1) ? 0 : r.GetDecimal(1),
-                            r.IsDBNull(2) ? 0 : r.GetDecimal(2),
-                            r.IsDBNull(3) ? 0 : r.GetDecimal(3)
-                        ));
-                    }
-                }
-
-                foreach (var p in oldPayrolls)
-                {
-                    if (p.LoanDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeLoans", p.EmployeeId, p.LoanDed);
-                    if (p.SuppDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeSupplementaryInsurances", p.EmployeeId, p.SuppDed);
-                    if (p.CarDed > 0) await RestoreInstallmentAsync(conn, transaction, "EmployeeCarInsurances", p.EmployeeId, p.CarDed);
-                }
-
-                using (var del = new SqlCommand("DELETE FROM Payrolls WHERE Year = @Year AND Month = @Month", conn, transaction))
-                {
-                    del.Parameters.AddWithValue("@Year", year);
-                    del.Parameters.AddWithValue("@Month", month);
-                    await del.ExecuteNonQueryAsync();
-                }
-
-                foreach (var p in newRecords)
-                {
-                    const string insertSql = @"
-                        INSERT INTO Payrolls 
-                            (EmployeeId, Year, Month, BaseSalary, TotalEarnings, TotalDeductions, NetPay, 
-                             InsuranceEmployee, InsuranceEmployer, IncomeTax, LoanDeduction, 
-                             SupplementaryInsuranceDeduction, CarInsuranceDeduction, OtherDeductions, OvertimePay, AbsenceDeduction)
-                        VALUES 
-                            (@EmpId, @Year, @Month, @BaseSalary, @TotalEarnings, @TotalDeductions, @NetPay,
-                             @InsuranceEmployee, @InsuranceEmployer, @IncomeTax, @LoanDeduction,
-                             @SupplementaryInsuranceDeduction, @CarInsuranceDeduction, @OtherDeductions, @OvertimePay, @AbsenceDeduction)";
-                    using var cmd = new SqlCommand(insertSql, conn, transaction);
-                    cmd.Parameters.AddWithValue("@EmpId", p.EmployeeId);
-                    cmd.Parameters.AddWithValue("@Year", p.Year);
-                    cmd.Parameters.AddWithValue("@Month", p.Month);
-                    cmd.Parameters.AddWithValue("@BaseSalary", p.BaseSalary);
-                    cmd.Parameters.AddWithValue("@TotalEarnings", p.TotalEarnings);
-                    cmd.Parameters.AddWithValue("@TotalDeductions", p.TotalDeductions);
-                    cmd.Parameters.AddWithValue("@NetPay", p.NetPay);
-                    cmd.Parameters.AddWithValue("@InsuranceEmployee", p.InsuranceEmployee);
-                    cmd.Parameters.AddWithValue("@InsuranceEmployer", p.InsuranceEmployer);
-                    cmd.Parameters.AddWithValue("@IncomeTax", p.IncomeTax);
-                    cmd.Parameters.AddWithValue("@LoanDeduction", p.LoanDeduction);
-                    cmd.Parameters.AddWithValue("@SupplementaryInsuranceDeduction", p.SupplementaryInsuranceDeduction);
-                    cmd.Parameters.AddWithValue("@CarInsuranceDeduction", p.CarInsuranceDeduction);
-                    cmd.Parameters.AddWithValue("@OtherDeductions", p.OtherDeductions);
-                    cmd.Parameters.AddWithValue("@OvertimePay", p.OvertimePay);
-                    cmd.Parameters.AddWithValue("@AbsenceDeduction", p.AbsenceDeduction);
-                    await cmd.ExecuteNonQueryAsync();
-                }
-
-                foreach (var kv in newLoanDeductions)
-                    if (kv.Value > 0) await DeductFromInstallmentTableAsync(conn, transaction, "EmployeeLoans", kv.Key, kv.Value);
-
-                foreach (var kv in newSuppInsDeductions)
-                    if (kv.Value > 0) await DeductFromInstallmentTableAsync(conn, transaction, "EmployeeSupplementaryInsurances", kv.Key, kv.Value);
-
-                foreach (var kv in newCarInsDeductions)
-                    if (kv.Value > 0) await DeductFromInstallmentTableAsync(conn, transaction, "EmployeeCarInsurances", kv.Key, kv.Value);
-
-                await transaction.CommitAsync();
-            }
-            catch
-            {
-                await transaction.RollbackAsync();
-                throw;
-            }
+            if (left <= 0) break;
+            decimal give = Math.Min(row.Paid, left);
+            using var upd = new SqlCommand(
+                $"UPDATE {table} SET RemainingAmount = RemainingAmount + @A, IsActive = 1 WHERE Id = @Id",
+                conn, transaction);
+            upd.Parameters.AddWithValue("@A", give);
+            upd.Parameters.AddWithValue("@Id", row.Id);
+            await upd.ExecuteNonQueryAsync();
+            left -= give;
         }
+    }
 
-        public async Task<DataTable> GetSavedPayrollsAsync(int year, int month)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
+    // ==========================================================
+    // متدهای خواندن اطلاعات
+    // ==========================================================
 
-            // ✅ اضافه شدن NationalCode و Position برای هدر فیش حقوقی
-            string sql = @"
-                SELECT 
-                    p.Id AS Id,
-                    p.EmployeeId AS EmployeeId,
-                    e.PersonnelCode AS PersonnelCode,
-                    e.NationalCode AS NationalCode,
-                    e.Position AS Position,
-                    e.FirstName + ' ' + e.LastName AS EmployeeName,
-                    ISNULL(e.PersonnelType, N'ماهانه') AS PersonnelType, 
-                    e.InsuranceNumber AS InsuranceNumber,
-                    
-                    ISNULL(b.ShebaNumber, '---') AS ShebaNumber,
-                    
-                    p.BaseSalary AS BaseSalary,
-                    ISNULL(p.OvertimePay, 0) AS OvertimePay,
-                    p.TotalEarnings AS TotalEarnings,
-                    p.InsuranceEmployee AS InsuranceEmployee,
-                    p.InsuranceEmployer AS InsuranceEmployer,
-                    p.SupplementaryInsuranceDeduction AS SupplementaryInsuranceDeduction,
-                    p.CarInsuranceDeduction AS CarInsuranceDeduction,
-                    p.IncomeTax AS IncomeTax,
-                    p.LoanDeduction AS LoanDeduction,
-                    p.OtherDeductions AS OtherDeductions,
-                    p.AbsenceDeduction AS AbsenceDeduction,
-                    
-                    ISNULL(a.WorkingDays, 0) AS WorkingDays,
-                    ISNULL(NULLIF(a.OvertimeHours, 0), NULLIF(a.NetOvertime, 0)) AS OvertimeHours,
-                    ISNULL(a.AbsenceHours, 0) AS AbsenceHours,
-                    
-                    (ISNULL(p.AbsenceDeduction, 0) + ISNULL(p.InsuranceEmployee, 0) + ISNULL(p.IncomeTax, 0) + ISNULL(p.LoanDeduction, 0) + ISNULL(p.SupplementaryInsuranceDeduction, 0) + ISNULL(p.CarInsuranceDeduction, 0) + ISNULL(p.OtherDeductions, 0)) AS TotalDeductions,
-                    
-                    (p.TotalEarnings - (ISNULL(p.AbsenceDeduction, 0) + ISNULL(p.InsuranceEmployee, 0) + ISNULL(p.IncomeTax, 0) + ISNULL(p.LoanDeduction, 0) + ISNULL(p.SupplementaryInsuranceDeduction, 0) + ISNULL(p.CarInsuranceDeduction, 0) + ISNULL(p.OtherDeductions, 0))) AS NetPay,
-                    
-                    ISNULL(e.TransportationAllowance, 0) AS TransportationAllowance,
-                    ISNULL(e.HousingAllowance, 0) AS HousingAllowance,
-                    ISNULL(e.GroceryAllowance, 0) AS GroceryAllowance,
-                    ISNULL(e.ChildAllowance, 0) AS ChildAllowance,
-                    ISNULL(e.MarriageAllowance, 0) AS MarriageAllowance,
-                    ISNULL(e.YearsBonus, 0) AS YearsBonus,
-                    ISNULL(e.AttractionAllowance, 0) AS AttractionAllowance,
-                    ISNULL(e.ResponsibilityAllowance, 0) AS ResponsibilityAllowance,
-                    ISNULL(e.ManagementAllowance, 0) AS ManagementAllowance,
-                    ISNULL(e.TechnicalAllowance, 0) AS TechnicalAllowance,
-                    ISNULL(e.OtherAllowances, 0) AS OtherAllowances
+    public async Task<bool> HasPayrollsForMonthAsync(int year, int month)
+    {
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        string sql = "SELECT COUNT(1) FROM Payrolls WHERE Year = @Year AND Month = @Month";
+        using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Year", year);
+        cmd.Parameters.AddWithValue("@Month", month);
+        var result = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(result) > 0;
+    }
+
+    public async Task<DataTable> GetSavedPayrollsAsync(int year, int month)
+    {
+        await EnsureLogTableAsync(); // اطمینان از وجود ستون‌های جدید
+        var dt = new DataTable();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        string sql = @"
+                SELECT p.Id, p.EmployeeId, p.Year, p.Month, p.BaseSalary, p.TotalEarnings, p.TotalDeductions, p.NetPay,
+                       p.InsuranceEmployee, p.InsuranceEmployer, p.IncomeTax, p.LoanDeduction, p.AdvanceDeduction, p.SupplementaryInsuranceDeduction,
+                       p.CarInsuranceDeduction, p.OtherDeductions, p.OvertimePay, p.AbsenceDeduction,
+                       p.YearsBonus, p.HousingAllowance, p.GroceryAllowance, p.ChildAllowance, p.AttractionAllowance,
+                       p.ResponsibilityAllowance, p.ManagementAllowance, p.TechnicalAllowance, p.MarriageAllowance,
+                       p.TransportationAllowance, p.OtherAllowances, p.InsuranceBase, p.TaxableBase,
+                       p.WorkingDays, p.OvertimeHours, p.AbsenceHours,
+                       e.PersonnelType,
+                       LTRIM(RTRIM(ISNULL(NULLIF(LTRIM(RTRIM(p.WorkLocation)), N''), ISNULL(e.WorkLocation, N'')))) AS WorkLocation,
+                       e.FirstName + ' ' + e.LastName AS EmployeeName, e.PersonnelCode, e.NationalCode, e.InsuranceNumber, e.Position,
+                       ISNULL((SELECT TOP 1 ShebaNumber FROM EmployeeBankAccounts WHERE EmployeeId = e.Id AND IsMainAccount = 1), '---') AS ShebaNumber
                 FROM Payrolls p
                 INNER JOIN Employees e ON p.EmployeeId = e.Id
-                LEFT JOIN Attendance a ON p.EmployeeId = a.EmployeeId AND p.Year = a.Year AND p.Month = a.Month
-                LEFT JOIN EmployeeBankAccounts b ON e.Id = b.EmployeeId AND b.IsMainAccount = 1
                 WHERE p.Year = @Year AND p.Month = @Month
                 ORDER BY e.LastName, e.FirstName";
 
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@Year", year);
-            cmd.Parameters.AddWithValue("@Month", month);
+        using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Year", year);
+        cmd.Parameters.AddWithValue("@Month", month);
+        using var adapter = new SqlDataAdapter(cmd);
+        await Task.Run(() => adapter.Fill(dt));
+        return dt;
+    }
 
-            using var adapter = new SqlDataAdapter(cmd);
-            var dt = new DataTable();
-            await Task.Run(() => adapter.Fill(dt));
-            return dt;
-        }
-
-        public async Task<DataTable> GetBankPaymentListAsync(int year, int month)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-
-            string sql = @"
-                SELECT 
-                    e.PersonnelCode AS [کد پرسنلی],
-                    e.FirstName + ' ' + e.LastName AS [نام و نام خانوادگی],
-                    e.NationalCode AS [کد ملی],
-                    ISNULL(b.ShebaNumber, '') AS [شماره شبا], 
-                    p.NetPay AS [مبلغ واریزی (ریال)]
+    public async Task<DataTable> GetBankPaymentListAsync(int year, int month)
+    {
+        var dt = new DataTable();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        string sql = @"
+                SELECT p.EmployeeId, e.FirstName, e.LastName, e.NationalCode, p.NetPay, 
+                       ISNULL((SELECT TOP 1 ShebaNumber FROM EmployeeBankAccounts WHERE EmployeeId = e.Id AND IsMainAccount = 1 AND ISNULL(IsActive, 1) = 1), '') AS ShebaNumber,
+                       ISNULL((SELECT TOP 1 BankCode FROM EmployeeBankAccounts WHERE EmployeeId = e.Id AND IsMainAccount = 1 AND ISNULL(IsActive, 1) = 1), '') AS BankCode
                 FROM Payrolls p
                 INNER JOIN Employees e ON p.EmployeeId = e.Id
-                LEFT JOIN EmployeeBankAccounts b ON e.Id = b.EmployeeId AND b.IsMainAccount = 1
-                WHERE p.Year = @Year AND p.Month = @Month
+                WHERE p.Year = @Year AND p.Month = @Month AND p.NetPay > 0
                 ORDER BY e.LastName, e.FirstName";
 
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@Year", year);
-            cmd.Parameters.AddWithValue("@Month", month);
+        using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Year", year);
+        cmd.Parameters.AddWithValue("@Month", month);
+        using var adapter = new SqlDataAdapter(cmd);
+        await Task.Run(() => adapter.Fill(dt));
+        return dt;
+    }
 
-            using var adapter = new SqlDataAdapter(cmd);
-            var dt = new DataTable();
-            await Task.Run(() => adapter.Fill(dt));
-            return dt;
-        }
-
-        public async Task<DataTable> GetEmployeePayrollHistoryAsync(int employeeId)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-
-            string sql = @"
-                SELECT 
-                    p.Year AS [سال],
-                    p.Month AS [ماه],
-                    p.BaseSalary AS [حقوق پایه],
-                    p.TotalEarnings AS [جمع مزایا],
-                    p.TotalDeductions AS [جمع کسورات],
-                    p.NetPay AS [خالص پرداختی]
+    public async Task<DataTable> GetEmployeePayrollHistoryAsync(int employeeId)
+    {
+        var dt = new DataTable();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        string sql = @"
+                SELECT p.Year, p.Month, p.BaseSalary, p.TotalEarnings, p.TotalDeductions, p.NetPay,
+                       p.InsuranceEmployee, p.IncomeTax, p.LoanDeduction, p.AdvanceDeduction
                 FROM Payrolls p
                 WHERE p.EmployeeId = @EmpId
                 ORDER BY p.Year DESC, p.Month DESC";
 
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@EmpId", employeeId);
+        using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@EmpId", employeeId);
+        using var adapter = new SqlDataAdapter(cmd);
+        await Task.Run(() => adapter.Fill(dt));
+        return dt;
+    }
 
-            using var adapter = new SqlDataAdapter(cmd);
-            var dt = new DataTable();
-            await Task.Run(() => adapter.Fill(dt));
-            return dt;
-        }
+    public async Task<DataTable> GetOfficialInsuranceReportAsync(int year, int month)
+    {
+        await EnsureLogTableAsync(); // اطمینان از وجود ستون‌های جدید
+        var dt = new DataTable();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        string sql = @"
+                SELECT ISNULL(e.InsuranceNumber, '') AS [شماره بیمه], e.FirstName AS [نام], e.LastName AS [نام خانوادگی], e.NationalCode AS [کد ملی],
+                       CASE WHEN p.InsuranceBase > 0 THEN p.InsuranceBase ELSE p.TotalEarnings END AS [مبلغ مشمول بیمه],
+                       p.InsuranceEmployee AS [سهم کارمند], p.InsuranceEmployer AS [سهم کارفرما],
+                       (p.InsuranceEmployee + p.InsuranceEmployer) AS [جمع بیمه]
+                FROM Payrolls p
+                INNER JOIN Employees e ON p.EmployeeId = e.Id
+                WHERE p.Year = @Year AND p.Month = @Month AND e.HasInsurance = 1
+                ORDER BY e.LastName, e.FirstName";
 
-        public async Task<DataTable> GetOfficialInsuranceReportAsync(int year, int month)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
+        using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Year", year);
+        cmd.Parameters.AddWithValue("@Month", month);
+        using var adapter = new SqlDataAdapter(cmd);
+        await Task.Run(() => adapter.Fill(dt));
+        return dt;
+    }
 
-            string sql = @"
-                SELECT 
-                    e.PersonnelCode AS [کد پرسنلی],
-                    e.FirstName + ' ' + e.LastName AS [نام و نام خانوادگی],
-                    e.NationalCode AS [کد ملی],
-                    e.InsuranceNumber AS [شماره بیمه],
-                    (SELECT WorkingDays FROM Attendance a 
-                     WHERE a.EmployeeId = e.Id AND a.Year = p.Year AND a.Month = p.Month) AS [روزهای کارکرد],
-                    p.BaseSalary AS [حقوق پایه],
-                    p.TotalEarnings AS [مبلغ مشمول بیمه],
-                    p.InsuranceEmployee AS [سهم کارمند],
-                    p.InsuranceEmployer AS [سهم کارفرما],
-                    (p.InsuranceEmployee + p.InsuranceEmployer) AS [جمع بیمه]
+    public async Task<DataTable> GetOfficialTaxReportAsync(int year, int month)
+    {
+        await EnsureLogTableAsync(); // اطمینان از وجود ستون‌های جدید
+        var dt = new DataTable();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        string sql = @"
+                SELECT e.NationalCode AS [کد ملی], e.FirstName AS [نام], e.LastName AS [نام خانوادگی],
+                       p.TotalEarnings AS [جمع حقوق و مزایا],
+                       p.InsuranceEmployee AS [بیمه سهم کارمند],
+                       CASE WHEN p.TaxableBase > 0 THEN p.TaxableBase
+                            ELSE CASE WHEN p.TotalEarnings - p.InsuranceEmployee > 0 THEN p.TotalEarnings - p.InsuranceEmployee ELSE 0 END END AS [درآمد مشمول مالیات],
+                       p.IncomeTax AS [مالیات محاسبه شده]
                 FROM Payrolls p
                 INNER JOIN Employees e ON p.EmployeeId = e.Id
                 WHERE p.Year = @Year AND p.Month = @Month
                 ORDER BY e.LastName, e.FirstName";
 
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@Year", year);
-            cmd.Parameters.AddWithValue("@Month", month);
+        using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Year", year);
+        cmd.Parameters.AddWithValue("@Month", month);
+        using var adapter = new SqlDataAdapter(cmd);
+        await Task.Run(() => adapter.Fill(dt));
+        return dt;
+    }
 
-            using var adapter = new SqlDataAdapter(cmd);
-            var dt = new DataTable();
-            await Task.Run(() => adapter.Fill(dt));
-            return dt;
-        }
+    // ==========================================================
+    // حذف (با برگشت اقساط)
+    // ==========================================================
 
-        public async Task<DataTable> GetOfficialTaxReportAsync(int year, int month)
+    public async Task DeletePayrollsForMonthAsync(int year, int month)
+    {
+        await EnsureLogTableAsync();
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
+            // ✅ FIX: قبل از حذف، اقساط کسرشده‌ی این ماه به وام/بیمه‌ها برمی‌گردد
+            await RestoreLoggedInstallmentsAsync(conn, transaction, year, month, null);
 
-            string sql = @"
-                SELECT 
-                    e.PersonnelCode AS [کد پرسنلی],
-                    e.FirstName + ' ' + e.LastName AS [نام و نام خانوادگی],
-                    e.NationalCode AS [کد ملی],
-                    p.BaseSalary AS [حقوق پایه],
-                    p.TotalEarnings AS [جمع حقوق و مزایا],
-                    p.InsuranceEmployee AS [بیمه کسر شده],
-                    p.SupplementaryInsuranceDeduction AS [بیمه تکمیلی],
-                    (p.TotalEarnings - p.InsuranceEmployee - p.SupplementaryInsuranceDeduction) AS [درآمد مشمول مالیات],
-                    p.IncomeTax AS [مالیات محاسبه شده]
-                FROM Payrolls p
-                INNER JOIN Employees e ON p.EmployeeId = e.Id
-                WHERE p.Year = @Year AND p.Month = @Month
-                ORDER BY e.LastName, e.FirstName";
-
-            using var cmd = new SqlCommand(sql, conn);
+            using var cmd = new SqlCommand("DELETE FROM Payrolls WHERE Year = @Year AND Month = @Month", conn, transaction);
             cmd.Parameters.AddWithValue("@Year", year);
             cmd.Parameters.AddWithValue("@Month", month);
+            await cmd.ExecuteNonQueryAsync();
 
-            using var adapter = new SqlDataAdapter(cmd);
-            var dt = new DataTable();
-            await Task.Run(() => adapter.Fill(dt));
-            return dt;
+            await transaction.CommitAsync();
         }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("حذف", "پردازش حقوق", $"کل حقوق سال {year} ماه {month}");
+    }
+
+    public async Task DeletePayrollAsync(int id)
+    {
+        await EnsureLogTableAsync();
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
+        {
+            int empId = 0, year = 0, month = 0;
+            bool found = false;
+
+            using (var sel = new SqlCommand("SELECT EmployeeId, Year, Month FROM Payrolls WHERE Id = @Id", conn, transaction))
+            {
+                sel.Parameters.AddWithValue("@Id", id);
+                using var reader = await sel.ExecuteReaderAsync();
+                if (await reader.ReadAsync())
+                {
+                    empId = reader.GetInt32(0);
+                    year = reader.GetInt32(1);
+                    month = reader.GetInt32(2);
+                    found = true;
+                }
+            }
+
+            if (found)
+                await RestoreLoggedInstallmentsAsync(conn, transaction, year, month, empId);
+
+            using (var cmd = new SqlCommand("DELETE FROM Payrolls WHERE Id = @Id", conn, transaction))
+            {
+                cmd.Parameters.AddWithValue("@Id", id);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            await transaction.CommitAsync();
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("حذف", "پردازش حقوق", $"فیش حقوقی شناسه {id}");
+    }
+
+    // ✅ متد جدید: حذف فیش حقوقی یک کارمند خاص در یک ماه خاص
+    public async Task DeletePayrollForEmployeeAsync(int employeeId, int year, int month)
+    {
+        await EnsureLogTableAsync();
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
+        {
+            // ۱. برگرداندن اقساط کسرشده (وام، بیمه تکمیلی و...) برای این کارمند در این ماه
+            await RestoreLoggedInstallmentsAsync(conn, transaction, year, month, employeeId);
+
+            // ۲. حذف رکورد حقوق از جدول Payrolls
+            using (var cmd = new SqlCommand("DELETE FROM Payrolls WHERE EmployeeId = @EmpId AND Year = @Year AND Month = @Month", conn, transaction))
+            {
+                cmd.Parameters.AddWithValue("@EmpId", employeeId);
+                cmd.Parameters.AddWithValue("@Year", year);
+                cmd.Parameters.AddWithValue("@Month", month);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            await transaction.CommitAsync();
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("حذف", "پردازش حقوق", $"پرسنل {employeeId}، سال {year} ماه {month}");
     }
 }

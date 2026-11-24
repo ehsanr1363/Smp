@@ -9,18 +9,18 @@ GO
 -- ============================================================
 -- ۱. رفع باگ P0: اضافه کردن دو ستون گمشده به Payrolls
 -- ============================================================
-IF COL_LENGTH('Payrolls', 'CarInsuranceDeduction') IS NULL
+IF COL_LENGTH('dbo.Payrolls', 'CarInsuranceDeduction') IS NULL
 BEGIN
-    ALTER TABLE Payrolls ADD CarInsuranceDeduction DECIMAL(18,0) DEFAULT 0;
+    ALTER TABLE dbo.Payrolls ADD CarInsuranceDeduction DECIMAL(18,0) DEFAULT 0;
     PRINT N'✅ ستون CarInsuranceDeduction به Payrolls اضافه شد.';
 END
 ELSE
     PRINT N'ℹ️ ستون CarInsuranceDeduction از قبل وجود دارد.';
 GO
 
-IF COL_LENGTH('Payrolls', 'OtherDeductions') IS NULL
+IF COL_LENGTH('dbo.Payrolls', 'OtherDeductions') IS NULL
 BEGIN
-    ALTER TABLE Payrolls ADD OtherDeductions DECIMAL(18,0) DEFAULT 0;
+    ALTER TABLE dbo.Payrolls ADD OtherDeductions DECIMAL(18,0) DEFAULT 0;
     PRINT N'✅ ستون OtherDeductions به Payrolls اضافه شد.';
 END
 ELSE
@@ -30,9 +30,9 @@ GO
 -- ============================================================
 -- ۲. رفع باگ P0: ساختن جدول EmployeeCarInsurances
 -- ============================================================
-IF OBJECT_ID('EmployeeCarInsurances', 'U') IS NULL
+IF OBJECT_ID('dbo.EmployeeCarInsurances', 'U') IS NULL
 BEGIN
-    CREATE TABLE EmployeeCarInsurances (
+    CREATE TABLE dbo.EmployeeCarInsurances (
         Id INT IDENTITY(1,1) PRIMARY KEY,
         EmployeeId INT NOT NULL,
         TotalAmount DECIMAL(18,0) NOT NULL,
@@ -42,7 +42,7 @@ BEGIN
         Description NVARCHAR(MAX) NULL,
         IsActive INT DEFAULT 1,
         CreatedAt DATETIME DEFAULT GETDATE(),
-        FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+        FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
     );
     PRINT N'✅ جدول EmployeeCarInsurances ساخته شد.';
 END
@@ -53,16 +53,16 @@ GO
 -- ============================================================
 -- ۳. یکسان‌سازی ذخیره‌ی درصد (TaxBrackets: 0.10 → 10)
 -- ============================================================
-IF EXISTS (SELECT 1 FROM sys.columns 
-           WHERE object_id = OBJECT_ID('TaxBrackets') 
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID('dbo.TaxBrackets')
            AND name = 'TaxRate' AND precision = 5 AND scale = 4)
 BEGIN
-    ALTER TABLE TaxBrackets ALTER COLUMN TaxRate DECIMAL(6,2) NOT NULL;
+    ALTER TABLE dbo.TaxBrackets ALTER COLUMN TaxRate DECIMAL(6,2) NOT NULL;
     PRINT N'✅ نوع ستون TaxBrackets.TaxRate به DECIMAL(6,2) تغییر یافت.';
 END
 GO
 
-UPDATE TaxBrackets
+UPDATE dbo.TaxBrackets
 SET TaxRate = TaxRate * 100
 WHERE TaxRate > 0 AND TaxRate < 1;
 GO

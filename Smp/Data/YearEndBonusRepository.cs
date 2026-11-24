@@ -1,32 +1,32 @@
 ﻿using Microsoft.Data.SqlClient;
-using SMP.Models;
+using Smp.Models;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
-namespace SMP.Data
+namespace Smp.Data;
+
+public class YearEndBonusRepository
 {
-    public class YearEndBonusRepository
+    private readonly string _connectionString;
+
+    public YearEndBonusRepository(string connectionString)
     {
-        private readonly string _connectionString;
+        _connectionString = connectionString;
+        // 👈 EnsureTableExists حذف شد
+    }
 
-        public YearEndBonusRepository(string connectionString)
+    public async Task SaveBonusesBatchAsync(List<YearEndBonusRecord> bonuses)
+    {
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
         {
-            _connectionString = connectionString;
-            // 👈 EnsureTableExists حذف شد
-        }
-
-        public async Task SaveBonusesBatchAsync(List<YearEndBonusRecord> bonuses)
-        {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
-
-            try
+            foreach (var b in bonuses)
             {
-                foreach (var b in bonuses)
-                {
-                    string sql = @"
+                string sql = @"
                         IF EXISTS (SELECT 1 FROM YearEndBonuses WHERE EmployeeId = @EmpId AND Year = @Year)
                         BEGIN
                             UPDATE YearEndBonuses SET 
@@ -40,24 +40,24 @@ namespace SMP.Data
                             VALUES (@EmpId, @Year, @Months, @Base, @Bonus, @Tax, @Net)
                         END";
 
-                    using var cmd = new SqlCommand(sql, conn, transaction);
-                    cmd.Parameters.AddWithValue("@EmpId", b.EmployeeId);
-                    cmd.Parameters.AddWithValue("@Year", b.Year);
-                    cmd.Parameters.AddWithValue("@Months", b.MonthsWorked);
-                    cmd.Parameters.AddWithValue("@Base", b.BaseSalary);
-                    cmd.Parameters.AddWithValue("@Bonus", b.BonusAmount);
-                    cmd.Parameters.AddWithValue("@Tax", b.Tax);
-                    cmd.Parameters.AddWithValue("@Net", b.NetBonus);
+                using var cmd = new SqlCommand(sql, conn, transaction);
+                cmd.Parameters.AddWithValue("@EmpId", b.EmployeeId);
+                cmd.Parameters.AddWithValue("@Year", b.Year);
+                cmd.Parameters.AddWithValue("@Months", b.MonthsWorked);
+                cmd.Parameters.AddWithValue("@Base", b.BaseSalary);
+                cmd.Parameters.AddWithValue("@Bonus", b.BonusAmount);
+                cmd.Parameters.AddWithValue("@Tax", b.Tax);
+                cmd.Parameters.AddWithValue("@Net", b.NetBonus);
 
-                    await cmd.ExecuteNonQueryAsync();
-                }
-                await transaction.CommitAsync();
+                await cmd.ExecuteNonQueryAsync();
             }
-            catch
-            {
-                await transaction.RollbackAsync();
-                throw;
-            }
+            await transaction.CommitAsync();
         }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("ثبت", "عیدی", $"{bonuses.Count} نفر");
     }
 }

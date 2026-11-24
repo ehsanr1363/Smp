@@ -1,7 +1,7 @@
-﻿using SMP.Data;
-using SMP.Helpers;
-using SMP.Models;
-using SMP.Services;
+﻿using Smp.Data;
+using Smp.Helpers;
+using Smp.Models;
+using Smp.Services;
 using System;
 using System.Drawing;
 using System.Linq;
@@ -9,224 +9,284 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class SettlementForm : Form
 {
-    public class SettlementForm : Form
+    private readonly EmployeeRepository _empRepository;
+    private readonly LeaveRepository _leaveRepository;
+    private readonly LoanRepository _loanRepository;
+    private readonly SettlementRepository _settlementRepository;
+    private readonly SettlementCalculatorService _calculator;
+    private readonly SalarySettingsRepository _settingsRepository;
+    private readonly EmployeeContractRepository _contractRepository;
+    private readonly AttendanceRepository _attendanceRepository;
+
+    private EmployeePickerField pickEmployee = null!;
+    private Button btnCalculate = null!, btnSave = null!;
+    private Label lblNet = null!, lblEmpInfo = null!;
+    private ModernStatCard _stYears = null!, _stService = null!, _stLeave = null!, _stSeverance = null!, _stLoan = null!;
+
+    private SettlementRecord? _currentSettlement;
+
+    // ✅ FIX P2: جلوگیری از تداخل و کرش
+    private readonly SemaphoreSlim _actionLock = new(1, 1);
+
+    public SettlementForm(string connectionString)
     {
-        private readonly EmployeeRepository _empRepository;
-        private readonly LeaveRepository _leaveRepository;
-        private readonly LoanRepository _loanRepository;
-        private readonly SettlementRepository _settlementRepository;
-        private readonly SettlementCalculatorService _calculator;
+        _empRepository = new EmployeeRepository(connectionString);
+        _leaveRepository = new LeaveRepository(connectionString);
+        _loanRepository = new LoanRepository(connectionString);
+        _settlementRepository = new SettlementRepository(connectionString);
+        _calculator = new SettlementCalculatorService();
+        _settingsRepository = new SalarySettingsRepository(connectionString);
+        _contractRepository = new EmployeeContractRepository(connectionString);
+        _attendanceRepository = new AttendanceRepository(connectionString);
 
-        private ComboBox cmbEmployee = null!;
-        private Button btnCalculate = null!, btnSave = null!;
-        private TableLayoutPanel resultLayout = null!;
-        private Label lblNet = null!;
+        BuildUI();
 
-        private SettlementRecord? _currentSettlement;
+        this.ApplyStandardHeader("تسویه حساب پرسنل", new Size(980, 640), isDialog: false);
+        ShowInTaskbar = false;
 
-        // ✅ FIX P2: جلوگیری از تداخل و کرش
-        private readonly SemaphoreSlim _actionLock = new(1, 1);
+        ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
 
-        public SettlementForm(string connectionString)
+        Shown += async (s, e) => await LoadEmployeesSafeAsync();
+    }
+
+    // ✅ FIX P2: آزادسازی منابع
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { try { _actionLock?.Dispose(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "SettlementForm"); } }
+        base.Dispose(disposing);
+    }
+
+    private void BuildUI()
+    {
+        // ─── کارت انتخاب کارمند (ذره‌بین) ───
+        pickEmployee = new EmployeePickerField { DialogTitle = "انتخاب کارمند برای تسویه حساب", AccentColor = ModernTheme.Primary, IncludeInactive = false };
+        pickEmployee.SelectedChanged += (s, e) => OnEmployeeChanged();
+
+        lblEmpInfo = new Label
         {
-            _empRepository = new EmployeeRepository(connectionString);
-            _leaveRepository = new LeaveRepository(connectionString);
-            _loanRepository = new LoanRepository(connectionString);
-            _settlementRepository = new SettlementRepository(connectionString);
-            _calculator = new SettlementCalculatorService();
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = ModernTheme.GetFont(10f),
+            ForeColor = ModernTheme.TextMuted,
+            BackColor = Color.Transparent,
+            Margin = new Padding(8, 0, 8, 0),
+            Text = "برای شروع، با کلیک روی ذره‌بین کارمند موردنظر را جستجو و انتخاب کنید."
+        };
 
-            BuildUI();
+        var empCard = new ModernCard("👤  کارمند", ModernTheme.Primary, 1, ModernUI.RowHeight, 34);
+        empCard.Body.Controls.Add(ModernUI.Row("انتخاب کارمند", pickEmployee), 0, 0);
+        empCard.Body.Controls.Add(lblEmpInfo, 0, 1);
 
-            this.ApplyStandardHeader("تسویه حساب پرسنل", new Size(800, 600));
-            ShowInTaskbar = false;
+        // ─── کارت‌های نتیجه ───
+        var strip = ModernReport.CreateStatStrip(5, 92);
+        _stYears = strip.Add("سال‌های کارکرد", ModernTheme.Primary);
+        _stService = strip.Add("مبلغ سنوات", ModernTheme.Teal);
+        _stLeave = strip.Add("بازخرید مرخصی", ModernTheme.Purple);
+        _stSeverance = strip.Add("عیدی / پاداش پایان سال", ModernTheme.Orange);
+        _stLoan = strip.Add("مانده وام (کسر می‌شود)", ModernTheme.Danger);
+        ResetResults();
 
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
+        // ─── کارت خالص تسویه ───
+        var netCard = new ModernCard("", ModernTheme.Success, 1, 64)
+        {
+            FillColor = ModernTheme.SuccessSoft,
+            BorderColor = ModernPaint.Tint(ModernTheme.Success, 40)
+        };
+        lblNet = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = ModernTheme.GetFont(17f, FontStyle.Bold),
+            ForeColor = ModernPaint.Darken(ModernTheme.Success, 45),
+            BackColor = Color.Transparent,
+            Name = "lblNet"
+        };
+        netCard.Body.Controls.Add(lblNet, 0, 0);
+        lblNet.Text = "خالص تسویه حساب:  ۰ ریال";
 
-            Shown += async (s, e) => await LoadEmployeesSafeAsync();
+        // ─── دکمه‌ها ───
+        btnCalculate = ModernButton.Create("🧮  محاسبه تسویه", ModernTheme.Primary, 190, 44);
+        btnCalculate.Click += async (s, e) => await CalculateSafeAsync();
+
+        btnSave = ModernButton.Create("ثبت نهایی و غیرفعال‌سازی", ModernTheme.Success, 240, 44);
+        btnSave.Enabled = false;
+        btnSave.Click += async (s, e) => await SaveSettlementSafeAsync();
+
+        var btnClose = ModernButton.Cancel("بستن", 110, 44);
+        btnClose.Click += (s, e) => Close();
+
+        var bar = ModernForm.CreateButtonBar(btnCalculate, btnSave, btnClose);
+        bar.Dock = DockStyle.Fill;
+
+        // ─── چیدمان ───
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(16, 12, 16, 0) };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, empCard.Height + 12));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, netCard.Height + 14));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68F));
+        empCard.Dock = DockStyle.Fill;
+        strip.Dock = DockStyle.Fill;
+        netCard.Dock = DockStyle.Fill;
+        root.Controls.Add(empCard, 0, 0);
+        root.Controls.Add(strip, 0, 1);
+        root.Controls.Add(netCard, 0, 2);
+        root.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent }, 0, 3);
+        root.Controls.Add(bar, 0, 4);
+        Controls.Add(root);
+    }
+
+    private void ResetResults()
+    {
+        _stYears.Text = "---";
+        _stService.SetAmount(0, "ریال");
+        _stLeave.SetAmount(0, "ریال");
+        _stSeverance.SetAmount(0, "ریال");
+        _stLoan.SetAmount(0, "ریال");
+    }
+
+    private void OnEmployeeChanged()
+    {
+        _currentSettlement = null;
+        btnSave.Enabled = false;
+        ResetResults();
+        lblNet.Text = "خالص تسویه حساب:  ۰ ریال";
+
+        var emp = pickEmployee.Selected;
+        if (emp is null)
+        {
+            lblEmpInfo.Text = "برای شروع، با کلیک روی ذره‌بین کارمند موردنظر را جستجو و انتخاب کنید.";
+            return;
         }
+        var parts = new System.Collections.Generic.List<string>();
+        if (!string.IsNullOrWhiteSpace(emp.Position)) parts.Add("سمت: " + emp.Position);
+        if (!string.IsNullOrWhiteSpace(emp.DepartmentName)) parts.Add("واحد: " + emp.DepartmentName);
+        if (emp.HireDate.HasValue) parts.Add("تاریخ استخدام: " + StringHelper.ConvertToPersianDigits(DateHelper.ToPersianDate(emp.HireDate.Value)));
+        lblEmpInfo.Text = parts.Count > 0 ? string.Join("   •   ", parts) : "اطلاعات تکمیلی ثبت نشده است.";
+    }
 
-        // ✅ FIX P2: آزادسازی منابع
-        protected override void Dispose(bool disposing)
+    private async Task LoadEmployeesSafeAsync()
+    {
+        if (IsDisposed) return;
+
+        try
         {
-            if (disposing) { try { _actionLock?.Dispose(); } catch { } }
-            base.Dispose(disposing);
-        }
-
-        private void BuildUI()
-        {
-            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 80F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
-
-            var topPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
-            var selectLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
-            selectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-            selectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 80F));
-
-            cmbEmployee = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
-            cmbEmployee.DisplayMember = "FullName";
-            cmbEmployee.ValueMember = "Id";
-
-            UIHelper.AddField(selectLayout, "انتخاب کارمند:", cmbEmployee, 0, 0, 1);
-            topPanel.Controls.Add(selectLayout);
-
-            resultLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(20, 10, 20, 10) };
-            resultLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-            resultLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60F));
-
-            AddResultRow("سال‌های کارکرد:", "---", 0);
-            AddResultRow("مبلغ سنوات:", "0", 1);
-            AddResultRow("بازخرید مرخصی:", "0", 2);
-            AddResultRow("عیدی/پاداش پایان سال:", "0", 3);
-            AddResultRow("مانده وام (کسر می‌شود):", "0", 4);
-
-            var netLabel = new Label { Text = "خالص تسویه حساب:", Font = UIHelper.PersianFont(14f, FontStyle.Bold), ForeColor = UIHelper.ActionGreen, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight };
-            lblNet = new Label { Text = "0 ریال", Name = "lblNet", Font = UIHelper.PersianFont(16f, FontStyle.Bold), ForeColor = UIHelper.ActionGreen, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-
-            resultLayout.Controls.Add(netLabel, 0, 5);
-            resultLayout.Controls.Add(lblNet, 1, 5);
-
-            var bottomPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
-
-            btnCalculate = UIHelper.CreateButton("محاسبه تسویه", UIHelper.SectionBlue, 180, 45);
-            btnCalculate.Dock = DockStyle.Right;
-            btnCalculate.Click += async (s, e) => await CalculateSafeAsync();
-
-            btnSave = UIHelper.CreateButton("ثبت نهایی و غیرفعال‌سازی", UIHelper.ActionGreen, 220, 45);
-            btnSave.Dock = DockStyle.Right;
-            btnSave.Enabled = false;
-            btnSave.Click += async (s, e) => await SaveSettlementSafeAsync();
-
-            bottomPanel.Controls.Add(btnCalculate);
-            bottomPanel.Controls.Add(new Panel { Width = 10, Dock = DockStyle.Right });
-            bottomPanel.Controls.Add(btnSave);
-
-            mainLayout.Controls.Add(topPanel, 0, 0);
-            mainLayout.Controls.Add(resultLayout, 0, 1);
-            mainLayout.Controls.Add(bottomPanel);
-
-            this.Controls.Add(mainLayout);
-        }
-
-        private void AddResultRow(string title, string value, int row)
-        {
-            var lbl = new Label { Text = title, Font = UIHelper.PersianFont(11f), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight };
-            var val = new Label { Text = value, Font = UIHelper.PersianFont(11f, FontStyle.Bold), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Name = $"lbl_{row}" };
-            resultLayout.Controls.Add(lbl, 0, row);
-            resultLayout.Controls.Add(val, 1, row);
-        }
-
-        private async Task LoadEmployeesSafeAsync()
-        {
-            if (IsDisposed) return;
-
-            try
+            await AsyncHelper.RunWithLoading(this, async () =>
             {
-                await AsyncHelper.RunWithLoading(this, async () =>
+                var employees = await _empRepository.GetEmployeesWithDetailsAsync("", false);
+                if (IsDisposed) return;
+                pickEmployee.SetEmployees(employees);
+            }, "در حال بارگذاری لیست پرسنل...");
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "SettlementForm.LoadEmployees");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message);
+        }
+    }
+
+    private async Task CalculateSafeAsync()
+    {
+        if (IsDisposed) return;
+        if (!await _actionLock.WaitAsync(0)) return; // ✅ FIX: جلوگیری از دابل کلیک
+
+        try
+        {
+            if (pickEmployee.SelectedId is null)
+            {
+                ModernMessageBox.ShowWarning("لطفاً ابتدا کارمند را انتخاب کنید.");
+                return;
+            }
+
+            int empId = pickEmployee.SelectedId.Value;
+            SettlementRecord? result = null;
+
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                var emp = await Task.Run(() => _empRepository.GetById(empId));
+                if (emp is null) throw new InvalidOperationException("اطلاعات کارمند یافت نشد.");
+
+                int approvedLeaves = await _leaveRepository.GetTotalApprovedLeaveDaysAsync(empId);
+                var loans = await _loanRepository.GetLoansByEmployeeIdAsync(empId);
+                decimal remainingLoan = loans.Where(l => l.IsActive).Sum(l => l.RemainingAmount);
+
+                // تنظیمات حقوق سال جاری شمسی (برای مبنای سنوات و عیدی)؛ اگر نبود، فقط حقوق پایه
+                int persianYear = new System.Globalization.PersianCalendar().GetYear(DateTime.Now);
+                var salarySettings = await _settingsRepository.GetByYearAsync(persianYear);
+
+                var workedByYear = await _attendanceRepository.GetWorkedDaysAsync(empId);
+                var contracts = await _contractRepository.GetContractsByEmployeeIdAsync(empId);
+                result = _calculator.CalculateSettlement(emp, approvedLeaves, remainingLoan, DateTime.Now, salarySettings, contracts,
+                    workedByYear.TryGetValue(empId, out var wy) ? wy : null);
+            }, "در حال محاسبه تسویه حساب...");
+
+            // ✅ FIX: بررسی IsDisposed بعد از await
+            if (!success || result is null || IsDisposed) return;
+
+            _currentSettlement = result;
+
+            _stYears.SetCount(result.YearsOfWork, "سال");
+            _stService.SetAmount(result.ServiceBonus, "ریال");
+            _stLeave.SetAmount(result.LeaveBonus, "ریال");
+            _stSeverance.SetAmount(result.SeverancePay, "ریال");
+            _stLoan.SetAmount(result.RemainingLoan, "ریال");
+
+            lblNet.Text = "خالص تسویه حساب:  " + NumberHelper.FormatThousands(result.NetSettlement, usePersianDigits: true) + " ریال";
+
+            btnSave.Enabled = true;
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "SettlementForm.CalculateSafeAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا در محاسبه:\n" + ex.Message);
+        }
+        finally
+        {
+            try { _actionLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "SettlementForm"); }
+        }
+    }
+
+    private async Task SaveSettlementSafeAsync()
+    {
+        if (_currentSettlement is null || IsDisposed) return;
+        if (!await _actionLock.WaitAsync(0)) return; // ✅ FIX: جلوگیری از دابل کلیک
+
+        try
+        {
+            if (!ModernMessageBox.AskConfirm("آیا از ثبت تسویه حساب و غیرفعال کردن این کارمند مطمئن هستید؟", "ثبت تسویه"))
+                return;
+
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                await _settlementRepository.SaveSettlementAsync(_currentSettlement);
+
+                var emp = await Task.Run(() => _empRepository.GetById(_currentSettlement.EmployeeId));
+                if (emp is not null)
                 {
-                    var employees = await _empRepository.GetEmployeesWithDetailsAsync("", false);
-                    if (IsDisposed) return;
-                    cmbEmployee.DataSource = employees;
-                }, "در حال بارگذاری لیست پرسنل...");
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "SettlementForm.LoadEmployees");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message);
-            }
-        }
-
-        private async Task CalculateSafeAsync()
-        {
-            if (IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return; // ✅ FIX: جلوگیری از دابل کلیک
-
-            try
-            {
-                if (cmbEmployee.SelectedValue == null) return;
-
-                int empId = (int)cmbEmployee.SelectedValue;
-                SettlementRecord? result = null;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var emp = await Task.Run(() => _empRepository.GetById(empId));
-                    if (emp == null) throw new InvalidOperationException("اطلاعات کارمند یافت نشد.");
-
-                    int approvedLeaves = await _leaveRepository.GetTotalApprovedLeaveDaysAsync(empId);
-                    var loans = await _loanRepository.GetLoansByEmployeeIdAsync(empId);
-                    decimal remainingLoan = loans.Where(l => l.IsActive).Sum(l => l.RemainingAmount);
-
-                    result = _calculator.CalculateSettlement(emp, approvedLeaves, remainingLoan, DateTime.Now);
-                }, "در حال محاسبه تسویه حساب...");
-
-                // ✅ FIX: بررسی IsDisposed بعد از await
-                if (!success || result == null || IsDisposed) return;
-
-                _currentSettlement = result;
-
-                ((Label)resultLayout.Controls["lbl_0"]).Text = StringHelper.ConvertToPersianDigits(result.YearsOfWork.ToString()) + " سال";
-                ((Label)resultLayout.Controls["lbl_1"]).Text = NumberHelper.FormatThousands(result.ServiceBonus, usePersianDigits: true) + " ریال";
-                ((Label)resultLayout.Controls["lbl_2"]).Text = NumberHelper.FormatThousands(result.LeaveBonus, usePersianDigits: true) + " ریال";
-                ((Label)resultLayout.Controls["lbl_3"]).Text = NumberHelper.FormatThousands(result.SeverancePay, usePersianDigits: true) + " ریال";
-                ((Label)resultLayout.Controls["lbl_4"]).Text = NumberHelper.FormatThousands(result.RemainingLoan, usePersianDigits: true) + " ریال";
-
-                lblNet.Text = NumberHelper.FormatThousands(result.NetSettlement, usePersianDigits: true) + " ریال";
-
-                btnSave.Enabled = true;
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "SettlementForm.CalculateSafeAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در محاسبه:\n" + ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
-        }
-
-        private async Task SaveSettlementSafeAsync()
-        {
-            if (_currentSettlement == null || IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return; // ✅ FIX: جلوگیری از دابل کلیک
-
-            try
-            {
-                if (!ModernMessageBox.AskConfirm("آیا از ثبت تسویه حساب و غیرفعال کردن این کارمند مطمئن هستید؟", "ثبت تسویه"))
-                    return;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    await _settlementRepository.SaveSettlementAsync(_currentSettlement);
-
-                    var emp = await Task.Run(() => _empRepository.GetById(_currentSettlement.EmployeeId));
-                    if (emp != null)
-                    {
-                        emp.IsActive = false;
-                        await _empRepository.UpdateAsync(emp);
-                    }
-                }, "در حال ثبت تسویه حساب...");
-
-                if (success && !IsDisposed)
-                {
-                    ToastHelper.Show("تسویه حساب با موفقیت ثبت شد و کارمند غیرفعال گردید.", isSuccess: true);
-                    this.DialogResult = DialogResult.OK;
-                    this.Close();
+                    emp.IsActive = false;
+                    await _empRepository.UpdateAsync(emp);
                 }
-            }
-            catch (Exception ex)
+            }, "در حال ثبت تسویه حساب...");
+
+            if (success && !IsDisposed)
             {
-                LogHelper.LogException(ex, "SettlementForm.SaveSettlementSafeAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در ثبت تسویه:\n" + ex.Message);
+                ToastHelper.Show("تسویه حساب با موفقیت ثبت شد و کارمند غیرفعال گردید.", isSuccess: true);
+                this.DialogResult = DialogResult.OK;
+                this.Close();
             }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "SettlementForm.SaveSettlementSafeAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا در ثبت تسویه:\n" + ex.Message);
+        }
+        finally
+        {
+            try { _actionLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "SettlementForm"); }
         }
     }
 }

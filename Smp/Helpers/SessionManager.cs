@@ -1,23 +1,33 @@
-﻿namespace SMP.Helpers
+﻿using Smp.Models;
+using System;
+
+namespace Smp.Helpers;
+
+public static class SessionManager
 {
-    public static class SessionManager
+    public static int UserId { get; set; }
+    public static string Username { get; set; } = "";
+    public static string FullName { get; set; } = "";
+    public static string Role { get; set; } = ""; // Admin, HR, Viewer
+
+    /// <summary>
+    /// آیا کاربر جاری دسترسی ادمین دارد؟
+    /// </summary>
+    public static bool IsAdmin => string.Equals(Role?.Trim(), "Admin", StringComparison.OrdinalIgnoreCase);
+
+    public static void Start(User user)
     {
-        public static int UserId { get; set; }
-        public static string Username { get; set; } = "";
-        public static string FullName { get; set; } = "";
-        public static string Role { get; set; } = ""; // Admin, HR, Viewer
+        UserId = user.Id;
+        Username = user.Username;
+        FullName = user.EmployeeFullName ?? "";
+        Role = user.Role ?? "";
+    }
 
-        /// <summary>
-        /// آیا کاربر جاری دسترسی ادمین دارد؟
-        /// </summary>
-        public static bool IsAdmin => Role == "Admin";
-
-        public static void Logout()
-        {
-            UserId = 0;
-            Username = "";
-            FullName = "";
-            Role = "";
-        }
+    public static void Logout()
+    {
+        UserId = 0;
+        Username = "";
+        FullName = "";
+        Role = "";
     }
 }

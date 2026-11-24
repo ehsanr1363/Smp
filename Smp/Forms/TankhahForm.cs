@@ -1,571 +1,454 @@
-﻿using SMP.Data;
-using SMP.Helpers;
-using SMP.Models;
+﻿using Smp.Data;
+using Smp.Helpers;
+using Smp.Models;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Microsoft.Data.SqlClient;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class TankhahForm : Form
 {
-    public class TankhahForm : Form
+    private readonly string _connectionString;
+    private readonly TankhahRepository _tankhahRepo;
+
+    private ComboBox cmbTankhah = null!;
+    private DataGridView dgvTankhahs = null!;
+    private ModernStatCard cardBalance = null!, cardSpent = null!, cardCharged = null!;
+    private Button btnChargesList = null!, btnDiag = null!;
+    private List<TankhahCharge> _charges = new();
+
+    private Button btnAddTankhah = null!, btnRefresh = null!, btnEditTankhah = null!, btnDeleteTankhah = null!;
+    private Button btnViewDetails = null!;
+    private Label lblEmpty = null!;
+
+    private List<Tankhah> _allOwners = new();
+    private List<TankhahList> _currentLists = new();
+    private TankhahList? _activeList = null;
+
+    private readonly SemaphoreSlim _loadLock = new(1, 1);
+
+    public TankhahForm(string connectionString)
     {
-        private readonly string _connectionString;
-        private readonly BankAccountRepository _bankRepo;
-        private readonly CashTransactionRepository _transRepo;
-        private readonly CashCheckRepository _checkRepo;
-        private readonly AccountTransferRepository _transferRepo;
-        private readonly LookupRepository _lookupRepo;
+        _connectionString = connectionString;
+        _tankhahRepo = new TankhahRepository(connectionString);
 
-        private ComboBox cmbTankhah = null!;
-        private DataGridView dgvTankhahs = null!;
+        BuildUI();
+        this.ApplyStandardHeader("مدیریت تنخواه‌ها و لیست‌های هزینه", new Size(1350, 700));
+        ShowInTaskbar = false;
 
-        private Label lblOwnerTotalBalance = null!, lblOwnerTotalSpent = null!;
+        ShortcutHelper.ApplyStandardShortcuts(this);
+        Shown += async (s, e) => await LoadOwnersAsync();
+    }
 
-        private Button btnAddTankhah = null!, btnRefresh = null!, btnEditTankhah = null!, btnDeleteTankhah = null!;
-        private Button btnViewDetails = null!, btnRepairBalances = null!;
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { try { _loadLock?.Dispose(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "TankhahForm"); } }
+        base.Dispose(disposing);
+    }
 
-        private List<CompanyBankAccount> _allTankhahs = new();
-        private CompanyBankAccount? _activeTankhah = null;
+    private void BuildUI()
+    {
+        // ── انتخاب شخص ──
+        cmbTankhah = ModernUI.Combo();
+        cmbTankhah.DisplayMember = "OwnerName";
+        cmbTankhah.ValueMember = "Id";
+        cmbTankhah.SelectedIndexChanged += async (s, e) => { if (!_isInitializing) await LoadListsAsync(); };
 
-        private readonly SemaphoreSlim _loadLock = new(1, 1);
-        private bool _isInitializing = true;
+        var filterBar = ModernReport.CreateFilterBar();
+        filterBar.Dock = DockStyle.Top;
+        ModernReport.AddFilter(filterBar, "انتخاب شخص (تنخواه‌دار)", cmbTankhah, 380);
 
-        private class TankhahOwnerItem
+        // ── کارت‌های خلاصه ──
+        var strip = ModernReport.CreateStatStrip(3, 72);
+        cardCharged = strip.Add("مجموع شارژهای شخص", ModernTheme.Primary);
+        cardBalance = strip.Add("مانده نزد تنخواه‌دار (شارژ − هزینه − تسویه)", ModernTheme.Success);
+        cardSpent = strip.Add("مجموع هزینه‌های شخص", ModernTheme.Danger);
+        strip.Dock = DockStyle.Fill;
+
+        // ── جدول ──
+        dgvTankhahs = ModernGrid.Create("Id");
+        dgvTankhahs.AutoGenerateColumns = false;
+        dgvTankhahs.FillColumns();
+        dgvTankhahs.AllowUserToAddRows = false;
+        dgvTankhahs.ReadOnly = true;
+        dgvTankhahs.MultiSelect = false;
+        dgvTankhahs.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        dgvTankhahs.SelectionChanged += DgvTankhahs_SelectionChanged;
+        dgvTankhahs.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0) BtnViewDetails_Click(null, EventArgs.Empty); };
+
+        dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "Id", DataPropertyName = "Id", Visible = false });
+        dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "Title", DataPropertyName = "Title", HeaderText = "عنوان لیست", FillWeight = 30 });
+        dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "InitialBalance", DataPropertyName = "InitialBalance", HeaderText = "موجودی اولیه", FillWeight = 18 });
+        dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "CurrentBalance", DataPropertyName = "CurrentBalance", HeaderText = "موجودی واقعی", FillWeight = 18 });
+        dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "TotalSpent", DataPropertyName = "TotalSpent", HeaderText = "مجموع هزینه‌ها", FillWeight = 18 });
+        dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "ChargeDate", DataPropertyName = "ChargeDate", HeaderText = "تاریخ شارژ / صورت وضعیت", FillWeight = 16 });
+        foreach (var c in new[] { "InitialBalance", "CurrentBalance", "TotalSpent", "ChargeDate" })
+            dgvTankhahs.Columns[c].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+
+        dgvTankhahs.CellFormatting += DgvTankhahs_CellFormatting;
+
+        lblEmpty = new Label
         {
-            public string OwnerName { get; set; } = "";
-            public List<CompanyBankAccount> Accounts { get; set; } = new();
-            public string DisplayTitle => $"تنخواه شخص: {OwnerName}";
+            Text = "برای این شخص هنوز لیستی ثبت نشده است.\nبا «ثبت لیست جدید»، از «لیست 1» شروع می‌شود.",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = ModernTheme.GetFont(11f),
+            ForeColor = ModernTheme.TextMuted,
+            BackColor = Color.Transparent,
+            Visible = false
+        };
+        dgvTankhahs.Controls.Add(lblEmpty);
+
+        var gridHost = ModernReport.WrapGrid(dgvTankhahs);
+        gridHost.Margin = new Padding(0, 4, 0, 8);
+
+        // ── دکمه‌ها ──
+        btnAddTankhah = ModernButton.Success("➕ ثبت لیست جدید", 170);
+        btnAddTankhah.Click += BtnNewTankhah_Click;
+
+        btnViewDetails = ModernButton.Primary("📋 جزئیات و ثبت هزینه‌ها", 210);
+        btnViewDetails.Enabled = false;
+        btnViewDetails.Click += BtnViewDetails_Click;
+
+        btnEditTankhah = ModernButton.Soft("✏️ ویرایش لیست", ModernTheme.Warning, 150);
+        btnEditTankhah.Enabled = false;
+        btnEditTankhah.Click += BtnEditTankhah_Click;
+
+        btnDeleteTankhah = ModernButton.Danger("🗑 حذف لیست", 130);
+        btnDeleteTankhah.Enabled = false;
+        btnDeleteTankhah.Click += BtnDeleteTankhah_Click;
+
+        btnRefresh = ModernButton.Outline("🔄 بروزرسانی", ModernTheme.Neutral, 130);
+        btnRefresh.Click += async (s, e) => await LoadOwnersAsync();
+
+        // لیست شارژها در فرم جداگانه نمایش داده می‌شود
+        btnChargesList = ModernButton.Outline("💳 لیست شارژها", ModernTheme.Teal, 170);
+        btnChargesList.Click += (s, e) =>
+        {
+            int? ownerId = (cmbTankhah.SelectedItem as Tankhah)?.Id;
+            using var f = new TankhahChargesForm(_connectionString, ownerId);
+            f.ShowDialog(this);
+        };
+
+        btnDiag = ModernButton.Outline("🩺 عیب‌یابی شارژها", ModernTheme.Neutral, 170);
+        btnDiag.Click += async (s, e) =>
+        {
+            try
+            {
+                string report = "";
+                await AsyncHelper.RunWithLoading(this, async () => { report = await _tankhahRepo.GetChargeDiagnosticsAsync(); }, "در حال بررسی دیتابیس...");
+                using var f = new Form { Text = "عیب‌یابی شارژ تنخواه", Size = new Size(900, 620), StartPosition = FormStartPosition.CenterParent, RightToLeft = RightToLeft.Yes, RightToLeftLayout = true };
+                f.Controls.Add(new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 10f), Text = report.Replace("\n", "\r\n") });
+                f.ShowDialog(this);
+            }
+            catch (Exception ex) { LogHelper.LogException(ex, "TankhahForm.Diag"); if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message); }
+        };
+
+        var bar = ModernForm.CreateButtonBar(btnAddTankhah, btnViewDetails, btnEditTankhah, btnDeleteTankhah, btnRefresh, btnChargesList, btnDiag);
+
+        // ── چیدمان ──
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12, 10, 12, 0), BackColor = ModernTheme.Background };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84F));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66F));
+        root.Controls.Add(filterBar, 0, 0);
+        root.Controls.Add(strip, 0, 1);
+        root.Controls.Add(gridHost, 0, 2);
+        root.Controls.Add(bar, 0, 3);
+        this.Controls.Add(root);
+    }
+
+    private bool _isInitializing = true;
+
+    private async Task LoadOwnersAsync()
+    {
+        if (IsDisposed) return;
+        if (!await _loadLock.WaitAsync(0)) return;
+
+        try
+        {
+            _isInitializing = true;
+            await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                _allOwners = await _tankhahRepo.GetAllTankhahsAsync();
+                if (IsDisposed) return;
+
+                cmbTankhah.DataSource = null;
+                cmbTankhah.DataSource = _allOwners;
+                if (_allOwners.Count > 0) cmbTankhah.SelectedIndex = 0;
+            }, "در حال بارگذاری اطلاعات...");
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "TankhahForm.LoadOwnersAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message);
+        }
+        finally
+        {
+            _isInitializing = false;
+            try { _loadLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "TankhahForm"); }
         }
 
-        public TankhahForm(string connectionString)
+        if (!IsDisposed && cmbTankhah.SelectedItem is not null)
         {
-            _connectionString = connectionString;
-            _bankRepo = new BankAccountRepository(connectionString);
-            _transRepo = new CashTransactionRepository(connectionString);
-            _checkRepo = new CashCheckRepository(connectionString);
-            _transferRepo = new AccountTransferRepository(connectionString);
-            _lookupRepo = new LookupRepository(connectionString);
-
-            BuildUI();
-            this.ApplyStandardHeader("مدیریت تنخواه‌ها و لیست‌های هزینه", new Size(1350, 700));
-            ShowInTaskbar = false;
-
-            ShortcutHelper.ApplyStandardShortcuts(this);
-            Shown += async (s, e) => await LoadTankhahsAsync();
+            await LoadListsAsync();
         }
+    }
 
-        protected override void Dispose(bool disposing)
+    private async Task LoadListsAsync(int? selectListId = null)
+    {
+        if (IsDisposed || cmbTankhah.SelectedItem is not Tankhah selectedOwner) return;
+
+        try
         {
-            if (disposing) { try { _loadLock?.Dispose(); } catch { } }
-            base.Dispose(disposing);
-        }
-
-        private void BuildUI()
-        {
-            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(10) };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-            var pnlTop = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = UIHelper.WarmPanelBackground, Padding = new Padding(10, 10, 10, 10) };
-            pnlTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-            pnlTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-            pnlTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-
-            var pnlSelect = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-            pnlSelect.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
-            pnlSelect.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-
-            var lblSelectTankhah = new Label { Text = "انتخاب شخص:", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Font = UIHelper.PersianFont(11f, FontStyle.Bold), ForeColor = UIHelper.WarmText };
-
-            cmbTankhah = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, Font = UIHelper.PersianFont(12f, FontStyle.Bold), BackColor = UIHelper.WarmWarningBackground, Margin = new Padding(5, 15, 5, 15) };
-            cmbTankhah.SelectedIndexChanged += async (s, e) => { if (!_isInitializing) await OnOwnerSelectedAsync(); };
-
-            pnlSelect.Controls.Add(lblSelectTankhah, 0, 0);
-            pnlSelect.Controls.Add(cmbTankhah, 1, 0);
-            pnlTop.Controls.Add(pnlSelect, 0, 0);
-
-            var pnlBalance = CreateKpiCard("💰 مجموع موجودی شخص", "0", UIHelper.ActionGreen);
-            lblOwnerTotalBalance = (Label)pnlBalance.Controls["lblValue"]!;
-            pnlTop.Controls.Add(pnlBalance, 1, 0);
-
-            var pnlSpent = CreateKpiCard("📤 مجموع پرداختی شخص", "0", UIHelper.ActionRed);
-            lblOwnerTotalSpent = (Label)pnlSpent.Controls["lblValue"]!;
-            pnlTop.Controls.Add(pnlSpent, 2, 0);
-
-            var pnlToolbarTop = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(5, 8, 5, 5), WrapContents = true };
-
-            btnAddTankhah = UIHelper.CreateButton("➕ ثبت لیست جدید", UIHelper.SectionBlue, 180, 40);
-            btnAddTankhah.Click += BtnNewTankhah_Click;
-
-            btnViewDetails = UIHelper.CreateButton("🔍 مشاهده جزئیات لیست", UIHelper.ActionGreen, 180, 40);
+            _isInitializing = true;
+            int? wantedId = selectListId ?? _activeList?.Id;   // لیست انتخاب‌شده بعد از بارگذاری حفظ شود
+            dgvTankhahs.DataSource = null;
+            _activeList = null;
             btnViewDetails.Enabled = false;
-            btnViewDetails.Click += BtnViewDetails_Click;
 
-            btnRepairBalances = UIHelper.CreateButton("🔧 اصلاح موجودی‌ها", UIHelper.ActionAmber, 150, 40);
-            btnRepairBalances.Click += async (s, e) => await RepairBalancesAsync();
-
-            btnRefresh = UIHelper.CreateButton("🔄 بروزرسانی", UIHelper.SectionGray, 120, 40);
-            btnRefresh.Click += async (s, e) => await LoadTankhahsAsync();
-
-            btnEditTankhah = UIHelper.CreateButton("✏️ ویرایش لیست", UIHelper.WarmSecondary, 150, 40);
-            btnEditTankhah.Enabled = false;
-            btnEditTankhah.Click += BtnEditTankhah_Click;
-
-            btnDeleteTankhah = UIHelper.CreateButton("🗑️ حذف لیست", UIHelper.WarmDanger, 130, 40);
-            btnDeleteTankhah.Enabled = false;
-            btnDeleteTankhah.Click += BtnDeleteTankhah_Click;
-
-            pnlToolbarTop.Controls.Add(btnAddTankhah);
-            pnlToolbarTop.Controls.Add(btnViewDetails);
-            pnlToolbarTop.Controls.Add(btnRepairBalances);
-            pnlToolbarTop.Controls.Add(btnEditTankhah);
-            pnlToolbarTop.Controls.Add(btnDeleteTankhah);
-            pnlToolbarTop.Controls.Add(btnRefresh);
-
-            dgvTankhahs = new DataGridView { Dock = DockStyle.Fill, AllowUserToAddRows = false, ReadOnly = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false, BackgroundColor = Color.White, RightToLeft = RightToLeft.Yes, AutoGenerateColumns = false };
-            dgvTankhahs.ApplyModernStyle();
-            dgvTankhahs.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            dgvTankhahs.SelectionChanged += DgvTankhahs_SelectionChanged;
-            dgvTankhahs.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0) BtnViewDetails_Click(null, EventArgs.Empty); };
-
-            dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "Id", DataPropertyName = "Id", Visible = false });
-            dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "Title", DataPropertyName = "Title", HeaderText = "عنوان لیست", FillWeight = 30 });
-            dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "InitialBalance", DataPropertyName = "InitialBalance", HeaderText = "موجودی اولیه", FillWeight = 18 });
-            dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "CurrentBalance", DataPropertyName = "CurrentBalance", HeaderText = "موجودی واقعی", FillWeight = 18 });
-            dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "TotalSpent", DataPropertyName = "TotalSpent", HeaderText = "مجموع هزینه‌ها", FillWeight = 18 });
-            dgvTankhahs.Columns.Add(new DataGridViewTextBoxColumn { Name = "CreatedAt", DataPropertyName = "CreatedAt", HeaderText = "تاریخ ایجاد", FillWeight = 16 });
-            dgvTankhahs.CellFormatting += DgvTankhahs_CellFormatting;
-
-            mainLayout.Controls.Add(pnlTop, 0, 0);
-            mainLayout.Controls.Add(pnlToolbarTop, 0, 1);
-            mainLayout.Controls.Add(dgvTankhahs, 0, 2);
-            this.Controls.Add(mainLayout);
-        }
-
-        private Panel CreateKpiCard(string title, string value, Color color)
-        {
-            var card = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Margin = new Padding(5) };
-            card.Paint += (s, e) => ControlPaint.DrawBorder(e.Graphics, card.ClientRectangle, color, 2, ButtonBorderStyle.Solid, color, 2, ButtonBorderStyle.Solid, color, 2, ButtonBorderStyle.Solid, color, 2, ButtonBorderStyle.Solid);
-
-            var lblTitle = new Label { Text = title, Dock = DockStyle.Top, Height = 25, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(9f, FontStyle.Bold), ForeColor = color };
-            var lblValue = new Label { Name = "lblValue", Text = value, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(14f, FontStyle.Bold), ForeColor = UIHelper.WarmText };
-
-            card.Controls.Add(lblValue);
-            card.Controls.Add(lblTitle);
-            return card;
-        }
-
-        private async Task LoadTankhahsAsync()
-        {
-            if (IsDisposed) return;
-            if (!await _loadLock.WaitAsync(0)) return;
-
-            bool success = false;
-            try
+            await AsyncHelper.RunWithLoading(this, async () =>
             {
-                _isInitializing = true;
-                success = await AsyncHelper.RunWithLoading(this, async () =>
+                _currentLists = await _tankhahRepo.GetListsByTankhahIdAsync(selectedOwner.Id);
+                _charges = await _tankhahRepo.GetChargesAsync(tankhahId: selectedOwner.Id);
+                if (IsDisposed) return;
+
+                var displayData = _currentLists.Select(x => new
                 {
-                    var allAccounts = await _bankRepo.GetAllAsync();
-                    _allTankhahs = allAccounts.Where(a => a.IsCashDesk).OrderBy(a => a.Id).ToList();
-                    if (IsDisposed) return;
+                    x.Id,
+                    x.Title,
+                    InitialBalance = x.ChargeAmount,
+                    CurrentBalance = x.CurrentBalance,
+                    TotalSpent = x.ChargeAmount - x.CurrentBalance, // محاسبه مجموع هزینه‌ها
+                    ChargeDate = x.ChargeDate
+                }).OrderByDescending(x => TankhahRepository.ParseListNumber(x.Title) ?? int.MinValue).ThenByDescending(x => x.Id).ToList();   // بزرگ به کوچک: لیست‌های جدید بالا
 
-                    var groupedTankhahs = _allTankhahs.GroupBy(a =>
-                    {
-                        string clean = Regex.Replace(a.Title, @"[0-9]", "").Replace("تنخواه", "").Replace("لیست", "").Replace("شماره", "").Trim();
-                        return StringHelper.NormalizePersianText(clean);
-                    }).Select(g => new TankhahOwnerItem { OwnerName = g.Key, Accounts = g.OrderBy(a => a.Id).ToList() }).OrderBy(x => x.OwnerName).ToList();
+                dgvTankhahs.DataSource = displayData;
 
-                    cmbTankhah.DataSource = null;
-                    cmbTankhah.DisplayMember = "DisplayTitle";
-                    cmbTankhah.DataSource = groupedTankhahs;
+                decimal totalSpent = _currentLists.Sum(x => x.ChargeAmount - x.CurrentBalance);
+                // شارژها شامل همه‌ی منابع (لیست‌های جدید + انتقال‌های قدیمی بانک → تنخواه)؛ بدهی تنخواه‌دار = شارژ − هزینه
+                decimal totalCharged = _charges.Sum(c => c.Amount);
+                // تسویه‌های برگشتی به بانک (سندِ مجزا خارج از لیست‌ها) از بدهی تنخواه‌دار کم می‌شود
+                decimal totalSettled = await _tankhahRepo.GetSettledTotalAsync(selectedOwner.OwnerName);
+                decimal totalBalance = totalCharged - totalSpent - totalSettled;
 
-                    if (groupedTankhahs.Count > 0) cmbTankhah.SelectedIndex = 0;
-                    else { dgvTankhahs.DataSource = null; ClearUI(); }
-                }, "در حال بارگذاری اطلاعات...");
+                cardBalance.NegativeRed = true;
+                cardBalance.SetAmount(totalBalance, "ریال");
+                cardSpent.SetAmount(totalSpent, "ریال");
+                cardCharged.SetAmount(totalCharged, "ریال");
 
-                if (!success && !IsDisposed) ModernMessageBox.ShowError("خطا در بارگذاری لیست تنخواه‌ها.");
-            }
-            catch (Exception ex)
+            }, "در حال بارگذاری لیست‌ها...");
+
+            _isInitializing = false;
+
+            lblEmpty.Visible = dgvTankhahs.Rows.Count == 0;
+            btnEditTankhah.Enabled = false; btnDeleteTankhah.Enabled = false;
+
+            if (dgvTankhahs.Rows.Count > 0)
             {
-                LogHelper.LogException(ex, "TankhahForm.LoadTankhahsAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message);
-            }
-            finally
-            {
-                _isInitializing = false;
-                try { _loadLock.Release(); } catch { }
-            }
-
-            if (success && !IsDisposed && cmbTankhah.SelectedItem != null)
-            {
-                try { await OnOwnerSelectedAsync(); }
-                catch (Exception ex) { LogHelper.LogException(ex, "TankhahForm.LoadTankhahsAsync - OnOwnerSelectedAsync"); }
-            }
-        }
-
-        // ✅ FIX بحرانی: فرمول موجودی کامل (شامل دریافتی‌ها)
-        // - قبلاً فقط «پرداختی‌ها» کم می‌شد و هرگونه «دریافتی» (نقدی/چک) نادیده گرفته می‌شد
-        // - حالا: موجودی = اولیه + شارژ + دریافتی نقدی/چک − تسویه − پرداختی نقدی/چک
-        private async Task OnOwnerSelectedAsync()
-        {
-            if (IsDisposed || cmbTankhah.SelectedItem is not TankhahOwnerItem selectedOwner) return;
-
-            try
-            {
-                _isInitializing = true;
-                dgvTankhahs.DataSource = null;
-                _activeTankhah = null;
-                btnViewDetails.Enabled = false;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
+                int target = 0;   // پیش‌فرض: بالاترین (جدیدترین) لیست
+                if (wantedId.HasValue)
                 {
-                    var displayTankhahs = new List<object>();
-                    decimal totalBalance = 0;
-                    decimal totalSpent = 0;
-
-                    foreach (var acc in selectedOwner.Accounts)
-                    {
-                        var accTrans = await _transRepo.GetByAccountIdAsync(acc.Id);
-                        var accChecks = await _checkRepo.GetByAccountIdAsync(acc.Id);
-                        var accTransfers = await _transferRepo.GetByAccountIdAsync(acc.Id);
-
-                        // ─── محاسبه صحیح گردش ───
-                        // تراکنش‌های نقدی/حواله (بدون انتقال بین حساب‌ها)
-                        var cashIn = accTrans
-                            .Where(t => t.Direction == DirectionTypes.Incoming
-                                     && !string.Equals(t.Category?.Trim(), "انتقال بین حساب‌ها", StringComparison.Ordinal))
-                            .Sum(t => t.Amount);
-
-                        var cashOut = accTrans
-                            .Where(t => t.Direction == DirectionTypes.Outgoing
-                                     && !string.Equals(t.Category?.Trim(), "انتقال بین حساب‌ها", StringComparison.Ordinal))
-                            .Sum(t => t.Amount);
-
-                        // چک‌ها (بدون باطل/برگشتی)
-                        var checkIn = accChecks
-                            .Where(c => c.CheckType == DirectionTypes.Incoming
-                                     && c.Status != "باطل شده" && c.Status != "برگشتی")
-                            .Sum(c => c.Amount);
-
-                        var checkOut = accChecks
-                            .Where(c => c.CheckType == DirectionTypes.Outgoing
-                                     && c.Status != "باطل شده" && c.Status != "برگشتی")
-                            .Sum(c => c.Amount);
-
-                        // انتقالات بین حساب‌ها
-                        var transferIn = accTransfers
-                            .Where(t => t.DestinationAccountId == acc.Id)
-                            .Sum(t => t.Amount);
-
-                        var transferOut = accTransfers
-                            .Where(t => t.SourceAccountId == acc.Id)
-                            .Sum(t => t.Amount);
-
-                        // جمع هزینه‌ها (فقط خروجی نقدی + چک)
-                        decimal totalSpentForThisAcc = cashOut + checkOut;
-
-                        // موجودی واقعی
-                        decimal trueBalance = acc.InitialBalance
-                                            + transferIn + cashIn + checkIn
-                                            - transferOut - cashOut - checkOut;
-
-                        totalBalance += trueBalance;
-                        totalSpent += totalSpentForThisAcc;
-
-                        string number = GetTankhahNumber(acc.Id);
-
-                        displayTankhahs.Add(new
-                        {
-                            acc.Id,
-                            Title = $"لیست {number}",
-                            acc.InitialBalance,
-                            CurrentBalance = trueBalance,
-                            TotalSpent = totalSpentForThisAcc,
-                            acc.CreatedAt
-                        });
-                    }
-
-                    if (IsDisposed) return;
-
-                    dgvTankhahs.DataSource = displayTankhahs.OrderByDescending(x => ((dynamic)x).Id).ToList();
-
-                    lblOwnerTotalBalance.Text = NumberHelper.FormatThousands(totalBalance, usePersianDigits: true);
-                    lblOwnerTotalBalance.ForeColor = totalBalance >= 0 ? UIHelper.ActionGreen : UIHelper.ActionRed;
-
-                    lblOwnerTotalSpent.Text = NumberHelper.FormatThousands(totalSpent, usePersianDigits: true);
-                    lblOwnerTotalSpent.ForeColor = UIHelper.ActionRed;
-                }, "در حال بارگذاری لیست‌ها...");
-
-                _isInitializing = false;
-
-                if (success && !IsDisposed && dgvTankhahs.Rows.Count > 0)
-                {
-                    dgvTankhahs.ClearSelection();
-                    dgvTankhahs.Rows[0].Selected = true;
-                    dgvTankhahs.CurrentCell = dgvTankhahs.Rows[0].Cells["Title"];
-                    DgvTankhahs_SelectionChanged(null, EventArgs.Empty);
+                    foreach (DataGridViewRow row in dgvTankhahs.Rows)
+                        if (Convert.ToInt32(row.Cells["Id"].Value) == wantedId.Value) { target = row.Index; break; }
                 }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "TankhahForm.OnOwnerSelectedAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message);
-            }
-            finally
-            {
-                _isInitializing = false;
+                dgvTankhahs.ClearSelection();
+                dgvTankhahs.Rows[target].Selected = true;
+                dgvTankhahs.CurrentCell = dgvTankhahs.Rows[target].Cells["Title"];
+                DgvTankhahs_SelectionChanged(null, EventArgs.Empty);
             }
         }
-
-        // ✅ FIX: فیلتر Category = «انتقال بین حساب‌ها» اضافه شد (هم‌خوان با GetTrueBalanceAsync)
-        private async Task RepairBalancesAsync()
+        catch (Exception ex)
         {
-            if (!ModernMessageBox.AskConfirm("این عملیات موجودی تمام حساب‌ها و تنخواه‌ها را بر اساس گردش واقعی (تراکنش‌ها، چک‌ها و انتقالات) بازسازی کرده و در دیتابیس ذخیره می‌کند. ادامه می‌دهید؟", "اصلاح موجودی‌ها")) return;
-
-            bool success = await AsyncHelper.RunWithLoading(this, async () =>
-            {
-                using var conn = new SqlConnection(_connectionString);
-                await conn.OpenAsync();
-                using var tx = conn.BeginTransaction();
-                try
-                {
-                    var accounts = await _bankRepo.GetAllAsync();
-                    foreach (var acc in accounts)
-                    {
-                        decimal inflow = 0, outflow = 0;
-
-                        using (var cmd = new SqlCommand("SELECT ISNULL(SUM(Amount), 0) FROM AccountTransfers WHERE DestinationAccountId = @Id", conn, tx))
-                        {
-                            cmd.Parameters.AddWithValue("@Id", acc.Id);
-                            inflow += Convert.ToDecimal(await cmd.ExecuteScalarAsync());
-                        }
-
-                        using (var cmd = new SqlCommand("SELECT ISNULL(SUM(Amount), 0) FROM AccountTransfers WHERE SourceAccountId = @Id", conn, tx))
-                        {
-                            cmd.Parameters.AddWithValue("@Id", acc.Id);
-                            outflow += Convert.ToDecimal(await cmd.ExecuteScalarAsync());
-                        }
-
-                        // ✅ فیلتر Category = «انتقال بین حساب‌ها» برای جلوگیری از دوباره‌شماری
-                        using (var cmd = new SqlCommand(@"
-                            SELECT ISNULL(SUM(Amount), 0) FROM CashTransactions 
-                            WHERE AccountId = @Id AND Direction = N'دریافتی'
-                              AND LTRIM(RTRIM(ISNULL(Category, ''))) <> N'انتقال بین حساب‌ها'", conn, tx))
-                        {
-                            cmd.Parameters.AddWithValue("@Id", acc.Id);
-                            inflow += Convert.ToDecimal(await cmd.ExecuteScalarAsync());
-                        }
-
-                        using (var cmd = new SqlCommand(@"
-                            SELECT ISNULL(SUM(Amount), 0) FROM CashTransactions 
-                            WHERE AccountId = @Id AND Direction = N'پرداختی'
-                              AND LTRIM(RTRIM(ISNULL(Category, ''))) <> N'انتقال بین حساب‌ها'", conn, tx))
-                        {
-                            cmd.Parameters.AddWithValue("@Id", acc.Id);
-                            outflow += Convert.ToDecimal(await cmd.ExecuteScalarAsync());
-                        }
-
-                        using (var cmd = new SqlCommand("SELECT ISNULL(SUM(Amount), 0) FROM CashChecks WHERE AccountId = @Id AND CheckType = N'دریافتی' AND Status NOT IN (N'باطل شده', N'برگشتی')", conn, tx))
-                        {
-                            cmd.Parameters.AddWithValue("@Id", acc.Id);
-                            inflow += Convert.ToDecimal(await cmd.ExecuteScalarAsync());
-                        }
-
-                        using (var cmd = new SqlCommand("SELECT ISNULL(SUM(Amount), 0) FROM CashChecks WHERE AccountId = @Id AND CheckType = N'پرداختی' AND Status NOT IN (N'باطل شده', N'برگشتی')", conn, tx))
-                        {
-                            cmd.Parameters.AddWithValue("@Id", acc.Id);
-                            outflow += Convert.ToDecimal(await cmd.ExecuteScalarAsync());
-                        }
-
-                        decimal trueBalance = acc.InitialBalance + inflow - outflow;
-
-                        using var updateCmd = new SqlCommand("UPDATE CompanyBankAccounts SET CurrentBalance = @Bal WHERE Id = @Id", conn, tx);
-                        updateCmd.Parameters.AddWithValue("@Bal", trueBalance);
-                        updateCmd.Parameters.AddWithValue("@Id", acc.Id);
-                        await updateCmd.ExecuteNonQueryAsync();
-                    }
-
-                    await tx.CommitAsync();
-                }
-                catch { await tx.RollbackAsync(); throw; }
-            }, "در حال بازسازی موجودی‌ها...");
-
-            if (success && !IsDisposed)
-            {
-                ToastHelper.Show("موجودی همه حساب‌ها و تنخواه‌ها بر اساس گردش واقعی اصلاح شد.", true);
-                await LoadTankhahsAsync();
-            }
+            LogHelper.LogException(ex, "TankhahForm.LoadListsAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا:\n" + ex.Message);
         }
-
-        private string GetTankhahNumber(int accountId)
+        finally
         {
-            var acc = _allTankhahs.FirstOrDefault(a => a.Id == accountId);
-            if (acc == null) return "1";
-            var match = Regex.Match(acc.Title, @"(?:تنخواه|لیست)\s*(?:شماره\s*)?(\d+)");
-            return match.Success ? match.Groups[1].Value : "1";
+            _isInitializing = false;
         }
+    }
 
-        private void DgvTankhahs_SelectionChanged(object? sender, EventArgs e)
+    private void DgvTankhahs_SelectionChanged(object? sender, EventArgs e)
+    {
+        if (_isInitializing || IsDisposed) return;
+
+        if (dgvTankhahs.CurrentRow is null)
         {
-            if (_isInitializing || IsDisposed) return;
-
-            if (dgvTankhahs.CurrentRow == null)
-            {
-                _activeTankhah = null;
-                btnViewDetails.Enabled = false;
-                btnEditTankhah.Enabled = false; btnDeleteTankhah.Enabled = false;
-                return;
-            }
-
-            int tankhahId = Convert.ToInt32(dgvTankhahs.CurrentRow.Cells["Id"].Value);
-            _activeTankhah = _allTankhahs.FirstOrDefault(a => a.Id == tankhahId);
-
-            if (_activeTankhah == null) return;
-
-            btnViewDetails.Enabled = true;
-            btnEditTankhah.Enabled = true; btnDeleteTankhah.Enabled = true;
-        }
-
-        private void BtnViewDetails_Click(object? sender, EventArgs e)
-        {
-            if (_activeTankhah == null || IsDisposed) return;
-            using var form = new TankhahDetailForm(_connectionString, _activeTankhah);
-            form.ShowDialog(this);
-            _ = OnOwnerSelectedAsync();
-        }
-
-        private void ClearUI()
-        {
-            _activeTankhah = null;
-            lblOwnerTotalBalance.Text = "0"; lblOwnerTotalSpent.Text = "0";
+            _activeList = null;
             btnViewDetails.Enabled = false;
             btnEditTankhah.Enabled = false; btnDeleteTankhah.Enabled = false;
+            return;
         }
 
-        private void DgvTankhahs_CellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+        int listId = Convert.ToInt32(dgvTankhahs.CurrentRow.Cells["Id"].Value);
+        _activeList = _currentLists.FirstOrDefault(a => a.Id == listId);
+
+        if (_activeList is null) return;
+
+        btnViewDetails.Enabled = true;
+        btnEditTankhah.Enabled = true; btnDeleteTankhah.Enabled = true;
+    }
+
+    private void DgvTankhahs_CellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+        string colName = dgvTankhahs.Columns[e.ColumnIndex].Name;
+
+        if (colName == "InitialBalance" || colName == "CurrentBalance" || colName == "TotalSpent")
         {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-            string colName = dgvTankhahs.Columns[e.ColumnIndex].Name;
-
-            if (colName == "InitialBalance" || colName == "CurrentBalance" || colName == "TotalSpent")
+            if (e.Value is decimal dec)
             {
-                if (e.Value is decimal dec)
+                e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true);
+                e.FormattingApplied = true;
+
+                if (colName == "CurrentBalance" && dec < 0)
                 {
-                    e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true);
-                    e.FormattingApplied = true;
-
-                    if (colName == "CurrentBalance" && dec < 0)
-                    {
-                        e.CellStyle.ForeColor = UIHelper.WarmDanger;
-                        e.CellStyle.Font = new Font(dgvTankhahs.Font, FontStyle.Bold);
-                    }
+                    e.CellStyle.ForeColor = ModernTheme.Danger;
+                    e.CellStyle.Font = ModernTheme.GetFont(11f, FontStyle.Bold);
                 }
-            }
-            else if (colName == "CreatedAt")
-            {
-                if (e.Value is DateTime dt) { e.Value = DateHelper.ToPersianDate(dt); e.FormattingApplied = true; }
             }
         }
-
-        private async Task<string?> AskForTankhahOwnerAsync()
+        else if (colName == "ChargeDate")
         {
-            var owners = await _lookupRepo.GetByCategoryAsync("TankhahOwner");
-            using var form = new Form { Text = "ثبت لیست جدید", Size = new Size(450, 220), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, RightToLeft = RightToLeft.Yes, RightToLeftLayout = true, Font = UIHelper.PersianFont(11f), BackColor = Color.White };
-            var lbl = new Label { Text = "نام صاحب تنخواه (مسئول):", Dock = DockStyle.Top, Height = 40, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(20, 10, 20, 0), Font = UIHelper.PersianFont(11f, FontStyle.Bold) };
-            var cmb = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDown, Font = UIHelper.PersianFont(12f), BackColor = UIHelper.WarmInputBackground };
-            cmb.Items.AddRange(owners.Select(o => o.Value).ToArray());
-            var pnlBottom = new Panel { Dock = DockStyle.Bottom, Height = 60, Padding = new Padding(20, 10, 20, 10) };
-            var btnOk = UIHelper.CreateButton("✔ تایید و ایجاد لیست", UIHelper.ActionGreen, 180, 40);
-            btnOk.DialogResult = DialogResult.OK; btnOk.Dock = DockStyle.Right; pnlBottom.Controls.Add(btnOk);
-            var pnlContent = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 10, 20, 10) };
-            pnlContent.Controls.Add(cmb); pnlContent.Controls.Add(lbl);
-            form.Controls.Add(pnlContent); form.Controls.Add(pnlBottom); form.AcceptButton = btnOk;
+            if (e.Value is DateTime dt) { e.Value = DateHelper.ToPersianDate(dt); e.FormattingApplied = true; }
+            else if (e.Value is null || e.Value == DBNull.Value) { e.Value = "---"; e.FormattingApplied = true; }
+        }
+    }
 
-            if (form.ShowDialog(this) == DialogResult.OK)
-            {
-                string ownerName = cmb.Text.Trim();
-                if (!string.IsNullOrEmpty(ownerName))
-                {
-                    if (!owners.Any(o => o.Value == ownerName)) _lookupRepo.Add(new LookupItem { Category = "TankhahOwner", Value = ownerName });
-                    return ownerName;
-                }
-            }
-            return null;
+    /// <summary>دیالوگ مدرن ثبت/ویرایش لیست؛ در صورت انصراف null برمی‌گرداند</summary>
+    private (string Title, decimal Amount)? ShowListDialog(string caption, string okText, string initialTitle, string initialAmount)
+    {
+        using var form = new Form();
+
+        var txtTitle = new TextBox { Text = initialTitle };
+        var txtAmount = new TextBox { Text = initialAmount };
+        SmartInputHelper.EnableSmartAmountTextBox(txtAmount);
+
+        int rh = ModernUI.RowHeight;
+        var card = new ModernCard("مشخصات لیست", ModernTheme.Success, 1, rh, rh);
+        card.Body.Controls.Add(ModernUI.Row("عنوان لیست", txtTitle), 0, 0);
+        card.Body.Controls.Add(ModernUI.Row("مبلغ شارژ (ریال)", txtAmount), 0, 1);
+        card.Dock = DockStyle.Fill;
+
+        var btnOk = ModernButton.Success(okText, 170, 44);
+        btnOk.Click += (s, e) =>
+        {
+            if (string.IsNullOrWhiteSpace(txtTitle.Text)) { ModernMessageBox.ShowWarning("عنوان لیست الزامی است."); return; }
+            form.DialogResult = DialogResult.OK;
+        };
+        var btnCancel = ModernButton.Cancel("انصراف", 110, 44);
+        btnCancel.Click += (s, e) => form.DialogResult = DialogResult.Cancel;
+        var bar = ModernForm.CreateButtonBar(btnOk, btnCancel);
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(12, 10, 12, 0), BackColor = ModernTheme.Background };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, card.Height + 8));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66F));
+        root.Controls.Add(card, 0, 0);
+        root.Controls.Add(bar, 0, 2);
+        form.Controls.Add(root);
+        form.ApplyStandardHeader(caption, new Size(560, 380));
+        form.AcceptButton = btnOk;
+        form.CancelButton = btnCancel;
+
+        if (form.ShowDialog(this) != DialogResult.OK) return null;
+        return (txtTitle.Text.Trim(), NumberHelper.ParseFormatted(txtAmount.Text));
+    }
+
+    /// <summary>
+    /// ساخت لیست بعدی بدون هیچ دیالوگی. شماره از ۱ شروع می‌شود و کوچک‌ترین شماره‌ی آزاد شخص انتخاب‌شده
+    /// استفاده می‌شود؛ پس بعد از حذف یک لیست، لیست بعدی دوباره با همان شماره ساخته می‌شود.
+    /// </summary>
+    private async void BtnNewTankhah_Click(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        if (cmbTankhah.SelectedItem is not Tankhah selected)
+        {
+            ModernMessageBox.ShowWarning("ابتدا شخص (تنخواه‌دار) را انتخاب کنید.");
+            return;
         }
 
-        private async void BtnNewTankhah_Click(object? sender, EventArgs e)
+        btnAddTankhah.Enabled = false;   // جلوگیری از دوبار کلیک و ساخت دو لیست
+        try
         {
-            if (IsDisposed) return;
-            string? ownerName = await AskForTankhahOwnerAsync();
-            if (string.IsNullOrWhiteSpace(ownerName)) return;
-
-            string normalizedOwner = StringHelper.NormalizePersianText(ownerName.Trim());
-            var existingNumbers = new HashSet<int>();
-            foreach (var t in _allTankhahs)
+            TankhahList? created = null;
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                string normalizedTitle = StringHelper.NormalizePersianText(t.Title);
-                if (normalizedTitle.EndsWith(normalizedOwner))
-                {
-                    var match = Regex.Match(t.Title, @"(?:تنخواه|لیست)\s*(?:شماره\s*)?(\d+)");
-                    if (match.Success && int.TryParse(match.Groups[1].Value, out int num)) existingNumbers.Add(num);
-                }
+                created = await _tankhahRepo.AddNextListAsync(selected.Id);
+            }, "در حال ساخت لیست جدید...");
+
+            if (success && created is not null && !IsDisposed)
+            {
+                ToastHelper.Show($"«{created.Title}» ساخته شد.", true);
+                await LoadListsAsync(created.Id);
             }
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "TankhahForm.BtnNewTankhah_Click");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا در ساخت لیست:\n" + ex.Message);
+        }
+        finally
+        {
+            if (!IsDisposed) btnAddTankhah.Enabled = true;
+        }
+    }
 
-            int nextNum = 1;
-            while (existingNumbers.Contains(nextNum)) nextNum++;
+    private async void BtnViewDetails_Click(object? sender, EventArgs e)
+    {
+        if (_activeList is null || IsDisposed) return;
+        int listId = _activeList.Id;
+        string owner = (cmbTankhah.SelectedItem as Tankhah)?.OwnerName ?? "";
+        using (var form = new TankhahDetailForm(_connectionString, _activeList, owner))
+        {
+            form.ShowDialog(this);
+        }
+        if (!IsDisposed) await LoadListsAsync(listId);
+    }
 
-            string newTitle = $"لیست {nextNum} {ownerName.Trim()}";
+    private async void BtnEditTankhah_Click(object? sender, EventArgs e)
+    {
+        if (_activeList is null || IsDisposed) return;
 
-            var account = new CompanyBankAccount { Title = newTitle, IsCashDesk = true, IsActive = true, InitialBalance = 0, CurrentBalance = 0 };
+        var input = ShowListDialog("ویرایش لیست", "ذخیره تغییرات", _activeList.Title,
+            NumberHelper.FormatThousands(_activeList.ChargeAmount, usePersianDigits: true));
+        if (input.HasValue)
+        {
+            var (listTitle, listAmount) = input.Value;
 
-            bool success = await AsyncHelper.RunWithLoading(this, async () => { await _bankRepo.AddAsync(account); }, "در حال ثبت لیست...");
+            _activeList.Title = listTitle;
+            _activeList.ChargeAmount = listAmount;
 
+            bool success = await AsyncHelper.RunWithLoading(this, async () => { await _tankhahRepo.UpdateListAsync(_activeList); }, "در حال ذخیره...");
             if (success && !IsDisposed)
             {
-                ToastHelper.Show($"لیست جدید ثبت شد: {newTitle}", isSuccess: true);
-                await LoadTankhahsAsync();
-                if (!IsDisposed)
-                {
-                    for (int i = 0; i < cmbTankhah.Items.Count; i++)
-                    {
-                        if (cmbTankhah.Items[i] is TankhahOwnerItem item && item.OwnerName == normalizedOwner) { cmbTankhah.SelectedIndex = i; break; }
-                    }
-                    await Task.Delay(300);
-                    if (dgvTankhahs.Rows.Count > 0)
-                    {
-                        dgvTankhahs.ClearSelection();
-                        dgvTankhahs.Rows[0].Selected = true;
-                        dgvTankhahs.CurrentCell = dgvTankhahs.Rows[0].Cells["Title"];
-                    }
-                }
+                ToastHelper.Show("تغییرات ذخیره شد.", true);
+                await LoadListsAsync();
             }
         }
+    }
 
-        private async void BtnEditTankhah_Click(object? sender, EventArgs e)
+    private async void BtnDeleteTankhah_Click(object? sender, EventArgs e)
+    {
+        if (_activeList is null || IsDisposed) return;
+        if (!ModernMessageBox.AskConfirm($"آیا از حذف «{_activeList.Title}» مطمئن هستید؟", "حذف لیست")) return;
+
+        bool success = false;
+        string errMsg = "";
+        try
         {
-            if (_activeTankhah == null || IsDisposed) return;
-            using var form = new TankhahListEditForm(_connectionString, _activeTankhah);
-            if (form.ShowDialog(this) == DialogResult.OK && !IsDisposed)
-            {
-                await LoadTankhahsAsync();
-            }
+            success = await AsyncHelper.RunWithLoading(this, async () => { await _tankhahRepo.DeleteListAsync(_activeList.Id); }, "در حال حذف...");
         }
+        catch (Exception ex) { errMsg = ex.Message; }
 
-        private async void BtnDeleteTankhah_Click(object? sender, EventArgs e)
-        {
-            if (_activeTankhah == null || IsDisposed) return;
-            if (!ModernMessageBox.AskConfirm($"آیا از حذف «{_activeTankhah.Title}» مطمئن هستید؟", "حذف لیست")) return;
-
-            bool success = await AsyncHelper.RunWithLoading(this, async () => { await _bankRepo.DeleteAsync(_activeTankhah.Id); }, "در حال حذف...");
-            if (success && !IsDisposed) { ToastHelper.Show("لیست حذف شد.", true); await LoadTankhahsAsync(); }
-        }
+        if (success && !IsDisposed) { ToastHelper.Show("لیست حذف شد.", true); await LoadListsAsync(); }
+        else if (!string.IsNullOrEmpty(errMsg)) { ModernMessageBox.ShowError(errMsg); }
     }
 }

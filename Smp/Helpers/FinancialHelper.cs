@@ -1,42 +1,52 @@
 ﻿using System;
+using System.Drawing;
 using System.Globalization;
 using System.Windows.Forms;
 
-namespace SMP.Helpers
+namespace Smp.Helpers;
+
+/// <summary>
+/// پوشش نازک روی NumberHelper؛ پارسر واحد پروژه NumberHelper است (تا دو پیاده‌سازی موازی نداشته باشیم).
+/// </summary>
+public static class FinancialHelper
 {
-    public static class FinancialHelper
+    // ۱. تبدیل عدد به رشته با جداکننده سه رقمی (صحیح بدون اعشار، اعشاری با دو رقم)
+    public static string Format(decimal value)
     {
-        // ۱. تبدیل عدد به رشته با جداکننده سه رقمی
-        public static string Format(decimal value)
-        {
-            return value.ToString("N0", CultureInfo.InvariantCulture);
-        }
-
-        // ۲. تبدیل رشته وارد شده به عدد
-        public static decimal Parse(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return 0;
-            string cleanText = text.Replace(",", "").Replace("،", "").Replace(" ", "").Trim();
-            if (decimal.TryParse(cleanText, out decimal result)) return result;
-            return 0;
-        }
-
-        // ۳. اعمال خودکار فرمت روی TextBox
-        public static void AttachToTextBox(TextBox textBox)
-        {
-            textBox.Leave += (sender, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(textBox.Text))
-                {
-                    decimal value = Parse(textBox.Text);
-                    textBox.Text = Format(value);
-                }
-            };
-        }
-
-        // ✅ FIX STEP 2: ToWords به NumberHelper.ToPersianWords واگذار شد
-        // (کد پیاده‌سازی تکراری حذف شد - NumberHelper از BigInteger پشتیبانی می‌کند)
-        public static string ToWords(decimal amount)
-            => NumberHelper.ToPersianWords(amount);
+        string fmt = value == decimal.Truncate(value) ? "N0" : "N2";
+        return value.ToString(fmt, CultureInfo.InvariantCulture);
     }
+
+    public static string NormalizeDigits(string? text) => NumberHelper.NormalizeNumberText(text);
+
+    public static bool TryParse(string? text, out decimal value) => NumberHelper.TryParseFormatted(text, out value);
+
+    public static decimal ParseStrict(string? text, string fieldName = "مبلغ") => NumberHelper.ParseFormattedStrict(text, fieldName);
+
+    /// <summary>سازگار با کد قبلی: خالی یا نامعتبر = ۰ (نامعتبر در لاگ ثبت می‌شود).</summary>
+    public static decimal Parse(string? text) => NumberHelper.ParseFormatted(text ?? "");
+
+    // ۳. اعمال خودکار فرمت روی TextBox (ورودی نامعتبر دست‌نخورده می‌ماند و قرمز می‌شود)
+    public static void AttachToTextBox(TextBox textBox)
+    {
+        Color normalColor = textBox.BackColor;
+        Color errorColor = Color.FromArgb(255, 220, 220);
+
+        textBox.Leave += (sender, e) =>
+        {
+            if (string.IsNullOrWhiteSpace(textBox.Text)) { textBox.BackColor = normalColor; return; }
+
+            if (TryParse(textBox.Text, out decimal value))
+            {
+                textBox.Text = Format(value);
+                textBox.BackColor = normalColor;
+            }
+            else
+            {
+                textBox.BackColor = errorColor;
+            }
+        };
+    }
+
+    public static string ToWords(decimal amount) => NumberHelper.ToPersianWords(amount);
 }

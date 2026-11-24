@@ -1,7 +1,6 @@
-﻿using Microsoft.Data.SqlClient;
-using SMP.Data;
-using SMP.Helpers;
-using SMP.Models;
+﻿using Smp.Data;
+using Smp.Helpers;
+using Smp.Models;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -11,326 +10,286 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class PartyEditForm : Form
 {
-    public class PartyEditForm : Form
+    private readonly string _connectionString;
+    private readonly int? _partyId;
+    private readonly bool _isEdit;
+
+    private ModernRadioButton rbNatural = null!, rbLegal = null!;
+    private ModernCheckBox chkForeign = null!, chkContractor = null!, chkClient = null!;
+    private ModernTextBox txtNationalCode = null!, txtFirstName = null!, txtLastName = null!;
+    private ModernTextBox txtCompanyName = null!, txtNationalId = null!, txtEconomicCode = null!;
+    private ModernTextBox txtPhone = null!, txtAddress = null!;
+    private ModernButton btnSave = null!;
+
+    private Label lblNationalCode = null!;
+    private readonly SemaphoreSlim _actionLock = new(1, 1);
+    private readonly TafsiliRepository _tafsiliRepo;
+    private readonly PartyRepository _repo;
+
+    public PartyEditForm(string connectionString, int? partyId = null)
     {
-        private readonly string _connectionString;
-        private readonly int? _partyId;
-        private readonly bool _isEdit;
+        _connectionString = connectionString;
+        _tafsiliRepo = new TafsiliRepository(connectionString);
+        _repo = new PartyRepository(connectionString);
+        _partyId = partyId;
+        _isEdit = partyId.HasValue && partyId.Value > 0;
 
-        private RadioButton rbNatural = null!, rbLegal = null!;
-        private CheckBox chkForeign = null!, chkContractor = null!, chkClient = null!;
-        private TextBox txtNationalCode = null!, txtFirstName = null!, txtLastName = null!;
-        private TextBox txtCompanyName = null!, txtNationalId = null!, txtEconomicCode = null!;
-        private TextBox txtPhone = null!, txtAddress = null!;
-        private Button btnSave = null!;
+        BuildUI();
+        ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
 
-        private TableLayoutPanel formLayout = null!;
-        private readonly SemaphoreSlim _actionLock = new(1, 1);
-        private readonly TafsiliRepository _tafsiliRepo;
-
-        public PartyEditForm(string connectionString, int? partyId = null)
+        Shown += async (s, e) =>
         {
-            _connectionString = connectionString;
-            _tafsiliRepo = new TafsiliRepository(connectionString);
-            _partyId = partyId;
-            _isEdit = partyId.HasValue && partyId.Value > 0;
+            if (_isEdit) await LoadDataAsync();
+            else ToggleFields();
+        };
+    }
 
-            BuildUI();
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { try { _actionLock?.Dispose(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyEditForm"); } }
+        base.Dispose(disposing);
+    }
 
-            Shown += async (s, e) =>
+    private void BuildUI()
+    {
+        int rh = ModernUI.RowHeight;
+
+        // ───── کارت ۱: نوع و نقش ─────
+        rbNatural = ModernUI.Radio("شخص حقیقی"); rbNatural.Checked = true;
+        rbLegal = ModernUI.Radio("شخص حقوقی");
+        chkForeign = ModernUI.Check("اتباع غیرایرانی", ModernTheme.Danger);
+        chkContractor = ModernUI.Check("پیمانکار", ModernTheme.Primary); chkContractor.Checked = true;
+        chkClient = ModernUI.Check("کارفرما", ModernTheme.Success); chkClient.Checked = true;
+
+        rbNatural.CheckedChanged += (s, e) => ToggleFields();
+        rbLegal.CheckedChanged += (s, e) => ToggleFields();
+        chkForeign.CheckedChanged += (s, e) => ToggleForeignMode();
+
+        var cardType = new ModernCard("نوع و نقش", ModernTheme.Primary, 3, rh, rh);
+        cardType.Body.Controls.Add(ModernUI.CenterInCell(rbNatural, 12), 0, 0);
+        cardType.Body.Controls.Add(ModernUI.CenterInCell(rbLegal, 12), 1, 0);
+        cardType.Body.Controls.Add(ModernUI.CenterInCell(chkForeign, 12), 2, 0);
+        cardType.Body.Controls.Add(ModernUI.CenterInCell(chkContractor, 12), 0, 1);
+        cardType.Body.Controls.Add(ModernUI.CenterInCell(chkClient, 12), 1, 1);
+
+        // ───── کارت ۲: مشخصات ─────
+        txtNationalCode = ModernUI.Input(ModernInputKind.Digits);
+        txtFirstName = ModernUI.Input();
+        txtLastName = ModernUI.Input();
+        txtCompanyName = ModernUI.Input();
+        txtNationalId = ModernUI.Input(ModernInputKind.Digits);
+        txtEconomicCode = ModernUI.Input(ModernInputKind.Digits);
+
+        var btnFetch = ModernButton.Soft("🔍", ModernTheme.Primary, 44, ModernUI.InputHeight);
+        btnFetch.Click += BtnFetchFromTafsili_Click;
+
+        var pnlNc = new BufferedTable { Margin = Padding.Empty, BackColor = Color.Transparent, ColumnCount = 2, RowCount = 1 };
+        pnlNc.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        pnlNc.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52F));
+        pnlNc.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        txtNationalCode.Dock = DockStyle.Fill;
+        btnFetch.Anchor = AnchorStyles.None;
+        pnlNc.Controls.Add(txtNationalCode, 0, 0);
+        pnlNc.Controls.Add(btnFetch, 1, 0);
+
+        var fldNc = ModernUI.Field("کد ملی", pnlNc);
+        lblNationalCode = (Label)((TableLayoutPanel)fldNc).GetControlFromPosition(0, 0)!;
+
+        int fh = ModernUI.FieldHeight;
+        var cardInfo = new ModernCard("مشخصات", ModernTheme.Teal, 2, fh, fh, fh);
+        cardInfo.Body.Controls.Add(fldNc, 0, 0);
+        cardInfo.Body.Controls.Add(ModernUI.Field("نام", txtFirstName), 1, 0);
+        cardInfo.Body.Controls.Add(ModernUI.Field("نام خانوادگی", txtLastName), 0, 1);
+        cardInfo.Body.Controls.Add(ModernUI.Field("نام شرکت", txtCompanyName), 1, 1);
+        cardInfo.Body.Controls.Add(ModernUI.Field("شناسه ملی شرکت", txtNationalId), 0, 2);
+        cardInfo.Body.Controls.Add(ModernUI.Field("کد اقتصادی", txtEconomicCode), 1, 2);
+
+        // ───── کارت ۳: تماس ─────
+        txtPhone = ModernUI.Input(ModernInputKind.Digits);
+        txtAddress = ModernUI.Memo(70);
+
+        var cardContact = new ModernCard("اطلاعات تماس", ModernTheme.Purple, 1, fh, fh + 50);
+        cardContact.Body.Controls.Add(ModernUI.Field("تلفن تماس", txtPhone), 0, 0);
+        cardContact.Body.Controls.Add(ModernUI.Row("آدرس", txtAddress), 0, 1);
+
+        // ───── دکمه‌ها ─────
+        btnSave = ModernButton.Success(_isEdit ? "💾 ذخیره تغییرات" : "💾 ذخیره", 200, 40);
+        btnSave.Click += async (s, e) => await SaveSafeAsync();
+        var btnCancel = ModernButton.Cancel();
+        btnCancel.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
+        var bar = ModernListKit.BuildActionBar(new Control[] { btnSave, btnCancel }, new Control[0]);
+
+        ModernListKit.ComposeRows(this,
+            _isEdit ? "ویرایش طرف قرارداد" : "افزودن طرف قرارداد",
+            "ثبت مشخصات پیمانکار / کارفرما",
+            new Size(850, 760),
+            (cardType, cardType.Height + 8),
+            (cardInfo, cardInfo.Height + 8),
+            (cardContact, cardContact.Height + 8),
+            (bar, 64));
+    }
+
+    // ✅ متد جدید برای فراخوانی از تفصیلی‌ها
+    private async void BtnFetchFromTafsili_Click(object? sender, EventArgs e)
+    {
+        using var form = new TafsiliSelectionForm(_connectionString);
+        if (form.ShowDialog(this) == DialogResult.OK && !IsDisposed)
+        {
+            var tafsili = await _tafsiliRepo.GetByIdAsync(form.SelectedId);
+            if (tafsili is null) return;
+
+            if (tafsili.PersonType.Contains("حقوقی"))
             {
-                if (_isEdit) await LoadDataAsync();
-                else ToggleFields();
-            };
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) { try { _actionLock?.Dispose(); } catch { } }
-            base.Dispose(disposing);
-        }
-
-        private void BuildUI()
-        {
-            var (contentLayout, btnPanel) = StandardFormHelper.SetupStandardLayout(
-                this, _isEdit ? "ویرایش طرف قرارداد" : "افزودن طرف قرارداد", new Size(850, 700));
-
-            formLayout = contentLayout;
-
-            // ─── ردیف ۰: نوع شخصیت ───
-            StandardFormHelper.AddRow(formLayout, 50F);
-
-            var pnlType = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-            rbNatural = new RadioButton { Text = "شخص حقیقی", Checked = true, AutoSize = true, Font = UIHelper.PersianFont(11f), Margin = new Padding(0, 10, 15, 0) };
-            rbLegal = new RadioButton { Text = "شخص حقوقی", AutoSize = true, Font = UIHelper.PersianFont(11f), Margin = new Padding(0, 10, 15, 0) };
-            chkForeign = new CheckBox { Text = "اتباع غیرایرانی", AutoSize = true, Font = UIHelper.PersianFont(10f), ForeColor = UIHelper.WarmDanger, Margin = new Padding(0, 10, 0, 0) };
-
-            rbNatural.CheckedChanged += (s, e) => ToggleFields();
-            rbLegal.CheckedChanged += (s, e) => ToggleFields();
-            chkForeign.CheckedChanged += (s, e) => ToggleForeignMode();
-
-            pnlType.Controls.Add(rbNatural);
-            pnlType.Controls.Add(rbLegal);
-            pnlType.Controls.Add(chkForeign);
-            UIHelper.AddField(formLayout, "نوع شخص:", pnlType, 0, 0, 1, 3);
-
-            // ─── ردیف ۱: نقش‌ها ───
-            StandardFormHelper.AddRow(formLayout, 50F);
-            var pnlRoles = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-            chkContractor = new CheckBox { Text = "پیمانکار", Checked = true, AutoSize = true, Font = UIHelper.PersianFont(11f), ForeColor = UIHelper.SectionBlue, Margin = new Padding(0, 10, 20, 0) };
-            chkClient = new CheckBox { Text = "کارفرما", Checked = true, AutoSize = true, Font = UIHelper.PersianFont(11f), ForeColor = UIHelper.ActionGreen, Margin = new Padding(0, 10, 0, 0) };
-            pnlRoles.Controls.Add(chkContractor);
-            pnlRoles.Controls.Add(chkClient);
-            UIHelper.AddField(formLayout, "نقش در سیستم:", pnlRoles, 1, 0, 1, 3);
-
-            // ─── ردیف ۲: کد ملی + دکمه ذره‌بین | نام ───
-            StandardFormHelper.AddRow(formLayout);
-
-            // ساخت پنل اختصاصی برای فیلد کد ملی به همراه دکمه جستجو
-            var pnlNationalCode = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
-            pnlNationalCode.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            pnlNationalCode.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40F));
-
-            txtNationalCode = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 5, 0) };
-            var btnFetchFromTafsili = new Button
-            {
-                Text = "🔍",
-                Dock = DockStyle.Fill,
-                BackColor = UIHelper.SectionBlue,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-                Margin = new Padding(0),
-                Cursor = Cursors.Hand
-            };
-            btnFetchFromTafsili.FlatAppearance.BorderSize = 0;
-            btnFetchFromTafsili.Click += BtnFetchFromTafsili_Click;
-
-            pnlNationalCode.Controls.Add(txtNationalCode, 0, 0);
-            pnlNationalCode.Controls.Add(btnFetchFromTafsili, 1, 0);
-
-            txtFirstName = new TextBox();
-            UIHelper.AddField(formLayout, "کد ملی / پاسپورت:", pnlNationalCode, 2, 0, 1);
-            UIHelper.AddField(formLayout, "نام:", txtFirstName, 2, 2, 3);
-
-            // ─── ردیف ۳: نام خانوادگی و نام شرکت ───
-            StandardFormHelper.AddRow(formLayout);
-            txtLastName = new TextBox();
-            txtCompanyName = new TextBox();
-            UIHelper.AddField(formLayout, "نام خانوادگی:", txtLastName, 3, 0, 1);
-            UIHelper.AddField(formLayout, "نام شرکت:", txtCompanyName, 3, 2, 3);
-
-            // ─── ردیف ۴: شناسه ملی و کد اقتصادی ───
-            StandardFormHelper.AddRow(formLayout);
-            txtNationalId = new TextBox();
-            txtEconomicCode = new TextBox();
-            UIHelper.AddField(formLayout, "شناسه ملی شرکت:", txtNationalId, 4, 0, 1);
-            UIHelper.AddField(formLayout, "کد اقتصادی:", txtEconomicCode, 4, 2, 3);
-
-            // ─── ردیف ۵: تلفن ───
-            StandardFormHelper.AddRow(formLayout);
-            txtPhone = new TextBox();
-            UIHelper.AddField(formLayout, "تلفن تماس:", txtPhone, 5, 0, 1);
-
-            // ─── ردیف ۶: آدرس ───
-            StandardFormHelper.AddRow(formLayout, 80F);
-            txtAddress = new TextBox { Multiline = true, Dock = DockStyle.Fill };
-            UIHelper.AddField(formLayout, "آدرس:", txtAddress, 6, 0, 1, 3);
-
-            // ─── دکمه ذخیره ───
-            btnSave = UIHelper.CreateButton("💾 ذخیره", UIHelper.ActionGreen, 200, 45);
-            btnSave.Font = UIHelper.PersianFont(12f, FontStyle.Bold);
-            btnSave.Click += async (s, e) => await SaveSafeAsync();
-            btnPanel.Controls.Add(btnSave);
-        }
-
-        // ✅ متد جدید برای فراخوانی از تفصیلی‌ها
-        private async void BtnFetchFromTafsili_Click(object? sender, EventArgs e)
-        {
-            using var form = new TafsiliSelectionForm(_connectionString);
-            if (form.ShowDialog(this) == DialogResult.OK && !IsDisposed)
-            {
-                var tafsili = await _tafsiliRepo.GetByIdAsync(form.SelectedId);
-                if (tafsili == null) return;
-
-                if (tafsili.PersonType.Contains("حقوقی"))
-                {
-                    rbLegal.Checked = true;
-                    txtCompanyName.Text = tafsili.CompanyName;
-                    txtNationalId.Text = tafsili.NationalId;
-                    txtNationalCode.Text = "";
-                    txtFirstName.Text = "";
-                    txtLastName.Text = "";
-                }
-                else
-                {
-                    rbNatural.Checked = true;
-                    txtFirstName.Text = tafsili.FirstName;
-                    txtLastName.Text = tafsili.LastName;
-                    txtNationalCode.Text = tafsili.NationalCode;
-                    txtCompanyName.Text = "";
-                    txtNationalId.Text = "";
-                }
-
-                txtEconomicCode.Text = tafsili.EconomicCode;
-
-                if (tafsili.Type == "پیمانکار")
-                {
-                    chkContractor.Checked = true;
-                    chkClient.Checked = false;
-                }
-                else if (tafsili.Type == "کارفرما")
-                {
-                    chkClient.Checked = true;
-                    chkContractor.Checked = false;
-                }
-
-                ToggleFields();
-                ToastHelper.Show("اطلاعات شخص از تفصیلی‌ها فراخوانی شد. لطفاً تلفن و آدرس را تکمیل کنید.", isSuccess: true);
+                rbLegal.Checked = true;
+                txtCompanyName.Text = tafsili.CompanyName;
+                txtNationalId.Text = tafsili.NationalId;
+                txtNationalCode.Text = "";
+                txtFirstName.Text = "";
+                txtLastName.Text = "";
             }
-        }
-
-        private void ToggleFields()
-        {
-            bool isNatural = rbNatural.Checked;
-            txtNationalCode.Enabled = isNatural;
-            txtFirstName.Enabled = isNatural;
-            txtLastName.Enabled = isNatural;
-            txtCompanyName.Enabled = !isNatural;
-            txtNationalId.Enabled = !isNatural;
-            txtEconomicCode.Enabled = !isNatural;
-        }
-
-        private void ToggleForeignMode()
-        {
-            var lbl = formLayout.GetControlFromPosition(0, 2) as Label;
-            if (lbl != null)
+            else
             {
-                lbl.Text = chkForeign.Checked ? "شماره پاسپورت:" : "کد ملی:";
-                lbl.ForeColor = chkForeign.Checked ? UIHelper.WarmDanger : UIHelper.WarmText;
+                rbNatural.Checked = true;
+                txtFirstName.Text = tafsili.FirstName;
+                txtLastName.Text = tafsili.LastName;
+                txtNationalCode.Text = tafsili.NationalCode;
+                txtCompanyName.Text = "";
+                txtNationalId.Text = "";
             }
-        }
 
-        private async Task LoadDataAsync()
+            txtEconomicCode.Text = tafsili.EconomicCode;
+
+            if (tafsili.Type == "پیمانکار")
+            {
+                chkContractor.Checked = true;
+                chkClient.Checked = false;
+            }
+            else if (tafsili.Type == "کارفرما")
+            {
+                chkClient.Checked = true;
+                chkContractor.Checked = false;
+            }
+
+            ToggleFields();
+            ToastHelper.Show("اطلاعات شخص از تفصیلی‌ها فراخوانی شد. لطفاً تلفن و آدرس را تکمیل کنید.", isSuccess: true);
+        }
+    }
+
+    private void ToggleFields()
+    {
+        bool isNatural = rbNatural.Checked;
+        txtNationalCode.Enabled = isNatural;
+        txtFirstName.Enabled = isNatural;
+        txtLastName.Enabled = isNatural;
+        txtCompanyName.Enabled = !isNatural;
+        txtNationalId.Enabled = !isNatural;
+        txtEconomicCode.Enabled = !isNatural;
+    }
+
+    private void ToggleForeignMode()
+    {
+        lblNationalCode.Text = chkForeign.Checked ? "شماره پاسپورت" : "کد ملی";
+        lblNationalCode.ForeColor = chkForeign.Checked ? ModernTheme.Danger : ModernTheme.Text;
+        txtNationalCode.Kind = chkForeign.Checked ? ModernInputKind.Text : ModernInputKind.Digits;
+    }
+
+    private async Task LoadDataAsync()
+    {
+        if (!_partyId.HasValue) return;
+
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
         {
-            if (!_partyId.HasValue) return;
+            var party = await _repo.GetByIdAsync(_partyId.Value)
+                        ?? throw new InvalidOperationException("رکورد یافت نشد.");
+
+            if (IsDisposed) return;
+
+            string type = party.PartyType;
+            rbNatural.Checked = type == PartyTypeHelper.Natural;
+            rbLegal.Checked = type == PartyTypeHelper.Legal;
+
+            chkForeign.Checked = party.IsForeign;
+            chkContractor.Checked = party.IsContractor;
+            chkClient.Checked = party.IsClient;
+
+            txtNationalCode.Text = party.NationalCode;
+            txtFirstName.Text = party.FirstName;
+            txtLastName.Text = party.LastName;
+            txtCompanyName.Text = party.CompanyName;
+            txtNationalId.Text = party.NationalId;
+            txtEconomicCode.Text = party.EconomicCode;
+            txtPhone.Text = party.Phone;
+            txtAddress.Text = party.Address;
+
+            ToggleForeignMode();
+        }, "در حال بارگذاری اطلاعات...");
+
+        if (!success) this.Close();
+    }
+
+    private async Task SaveSafeAsync()
+    {
+        if (IsDisposed) return;
+        if (!await _actionLock.WaitAsync(0)) return;
+
+        try
+        {
+            if (!chkContractor.Checked && !chkClient.Checked)
+            {
+                ModernMessageBox.ShowWarning("شخص باید حداقل در یکی از نقش‌ها (پیمانکار یا کارفرما) انتخاب شود.");
+                return;
+            }
+
+            if (rbNatural.Checked)
+            {
+                if (!chkForeign.Checked && !NationalCodeHelper.IsValid(txtNationalCode.Text)) { ModernMessageBox.ShowWarning("کد ملی نامعتبر است."); return; }
+                if (string.IsNullOrWhiteSpace(txtFirstName.Text) || string.IsNullOrWhiteSpace(txtLastName.Text)) { ModernMessageBox.ShowWarning("نام و نام خانوادگی الزامی است."); return; }
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(txtCompanyName.Text)) { ModernMessageBox.ShowWarning("نام شرکت الزامی است."); return; }
+                if (!chkForeign.Checked && !string.IsNullOrWhiteSpace(txtNationalId.Text) && !Regex.IsMatch(txtNationalId.Text.Trim(), @"^\d{11}$"))
+                { ModernMessageBox.ShowWarning("شناسه ملی باید یک عدد ۱۱ رقمی باشد."); return; }
+            }
+
+            int currentId = _partyId ?? 0;
 
             bool success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                string query = "SELECT * FROM Parties WHERE Id = @id";
-                var dt = await Task.Run(() => DbHelper.ExecuteQuery(_connectionString, query, new SqlParameter("@id", _partyId.Value)));
+                await _repo.SaveAsync(new PartyRecord
+                {
+                    Id = currentId,
+                    PartyType = rbNatural.Checked ? PartyTypeHelper.Natural : PartyTypeHelper.Legal,
+                    IsForeign = chkForeign.Checked,
+                    IsContractor = chkContractor.Checked,
+                    IsClient = chkClient.Checked,
+                    NationalCode = txtNationalCode.Text,
+                    FirstName = txtFirstName.Text,
+                    LastName = txtLastName.Text,
+                    CompanyName = txtCompanyName.Text,
+                    NationalId = txtNationalId.Text,
+                    EconomicCode = txtEconomicCode.Text,
+                    Phone = txtPhone.Text,
+                    Address = txtAddress.Text
+                });
+            }, "در حال ذخیره اطلاعات...");
 
-                if (dt.Rows.Count == 0) throw new InvalidOperationException("رکورد یافت نشد.");
-                var row = dt.Rows[0];
-
-                if (IsDisposed) return;
-
-                string type = row["PartyType"].ToString()!;
-                rbNatural.Checked = type == PartyTypeHelper.Natural;
-                rbLegal.Checked = type == PartyTypeHelper.Legal;
-
-                chkForeign.Checked = Convert.ToInt32(row["IsForeign"]) == 1;
-                chkContractor.Checked = Convert.ToInt32(row["IsContractor"]) == 1;
-                chkClient.Checked = Convert.ToInt32(row["IsClient"]) == 1;
-
-                txtNationalCode.Text = row["NationalCode"]?.ToString();
-                txtFirstName.Text = row["FirstName"]?.ToString();
-                txtLastName.Text = row["LastName"]?.ToString();
-                txtCompanyName.Text = row["CompanyName"]?.ToString();
-                txtNationalId.Text = row["NationalId"]?.ToString();
-                txtEconomicCode.Text = row["EconomicCode"]?.ToString();
-                txtPhone.Text = row["Phone"]?.ToString();
-                txtAddress.Text = row["Address"]?.ToString();
-
-                ToggleForeignMode();
-            }, "در حال بارگذاری اطلاعات...");
-
-            if (!success) this.Close();
+            if (success && !IsDisposed)
+            {
+                ToastHelper.Show("اطلاعات با موفقیت ذخیره شد.", true);
+                DialogResult = DialogResult.OK;
+                Close();
+            }
         }
-
-        private async Task SaveSafeAsync()
+        catch (Exception ex)
         {
-            if (IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                if (!chkContractor.Checked && !chkClient.Checked)
-                {
-                    ModernMessageBox.ShowWarning("شخص باید حداقل در یکی از نقش‌ها (پیمانکار یا کارفرما) انتخاب شود.");
-                    return;
-                }
-
-                if (rbNatural.Checked)
-                {
-                    if (!chkForeign.Checked && !NationalCodeHelper.IsValid(txtNationalCode.Text)) { ModernMessageBox.ShowWarning("کد ملی نامعتبر است."); return; }
-                    if (string.IsNullOrWhiteSpace(txtFirstName.Text) || string.IsNullOrWhiteSpace(txtLastName.Text)) { ModernMessageBox.ShowWarning("نام و نام خانوادگی الزامی است."); return; }
-                }
-                else
-                {
-                    if (string.IsNullOrWhiteSpace(txtCompanyName.Text)) { ModernMessageBox.ShowWarning("نام شرکت الزامی است."); return; }
-                    if (!chkForeign.Checked && !string.IsNullOrWhiteSpace(txtNationalId.Text) && !Regex.IsMatch(txtNationalId.Text.Trim(), @"^\d{11}$"))
-                    { ModernMessageBox.ShowWarning("شناسه ملی باید یک عدد ۱۱ رقمی باشد."); return; }
-                }
-
-                int currentId = _partyId ?? 0;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    if (!string.IsNullOrWhiteSpace(txtNationalCode.Text))
-                    {
-                        string checkNc = "SELECT COUNT(1) FROM Parties WHERE NationalCode = @nc AND Id != @id";
-                        if (Convert.ToInt32(await Task.Run(() => DbHelper.ExecuteScalar(_connectionString, checkNc, new SqlParameter("@nc", txtNationalCode.Text.Trim()), new SqlParameter("@id", currentId)))) > 0)
-                            throw new InvalidOperationException("این کد ملی قبلاً ثبت شده است.");
-                    }
-                    if (!string.IsNullOrWhiteSpace(txtNationalId.Text))
-                    {
-                        string checkNid = "SELECT COUNT(1) FROM Parties WHERE NationalId = @nid AND Id != @id";
-                        if (Convert.ToInt32(await Task.Run(() => DbHelper.ExecuteScalar(_connectionString, checkNid, new SqlParameter("@nid", txtNationalId.Text.Trim()), new SqlParameter("@id", currentId)))) > 0)
-                            throw new InvalidOperationException("این شناسه ملی قبلاً ثبت شده است.");
-                    }
-
-                    string query = _isEdit
-                        ? @"UPDATE Parties SET PartyType=@type, IsForeign=@isForeign, IsContractor=@isContractor, IsClient=@isClient, NationalCode=@nc, FirstName=@fn, LastName=@ln, CompanyName=@cn, NationalId=@nid, EconomicCode=@ec, Phone=@phone, Address=@addr WHERE Id=@id;"
-                        : @"INSERT INTO Parties (PartyType, IsForeign, IsContractor, IsClient, NationalCode, FirstName, LastName, CompanyName, NationalId, EconomicCode, Phone, Address) VALUES (@type, @isForeign, @isContractor, @isClient, @nc, @fn, @ln, @cn, @nid, @ec, @phone, @addr);";
-
-                    var parameters = new List<SqlParameter>
-                    {
-                        new SqlParameter("@type", rbNatural.Checked ? PartyTypeHelper.Natural : PartyTypeHelper.Legal),
-                        new SqlParameter("@isForeign", chkForeign.Checked ? 1 : 0),
-                        new SqlParameter("@isContractor", chkContractor.Checked ? 1 : 0),
-                        new SqlParameter("@isClient", chkClient.Checked ? 1 : 0),
-                        new SqlParameter("@nc", string.IsNullOrWhiteSpace(txtNationalCode.Text) ? DBNull.Value : txtNationalCode.Text.Trim()),
-                        new SqlParameter("@fn", string.IsNullOrWhiteSpace(txtFirstName.Text) ? DBNull.Value : txtFirstName.Text.Trim()),
-                        new SqlParameter("@ln", string.IsNullOrWhiteSpace(txtLastName.Text) ? DBNull.Value : txtLastName.Text.Trim()),
-                        new SqlParameter("@cn", string.IsNullOrWhiteSpace(txtCompanyName.Text) ? DBNull.Value : txtCompanyName.Text.Trim()),
-                        new SqlParameter("@nid", string.IsNullOrWhiteSpace(txtNationalId.Text) ? DBNull.Value : txtNationalId.Text.Trim()),
-                        new SqlParameter("@ec", string.IsNullOrWhiteSpace(txtEconomicCode.Text) ? DBNull.Value : txtEconomicCode.Text.Trim()),
-                        new SqlParameter("@phone", string.IsNullOrWhiteSpace(txtPhone.Text) ? DBNull.Value : txtPhone.Text.Trim()),
-                        new SqlParameter("@addr", string.IsNullOrWhiteSpace(txtAddress.Text) ? DBNull.Value : txtAddress.Text.Trim())
-                    };
-
-                    if (_isEdit) parameters.Add(new SqlParameter("@id", _partyId.Value));
-
-                    await Task.Run(() => DbHelper.ExecuteNonQuery(_connectionString, query, parameters.ToArray()));
-                }, "در حال ذخیره اطلاعات...");
-
-                if (success && !IsDisposed)
-                {
-                    ToastHelper.Show("اطلاعات با موفقیت ذخیره شد.", true);
-                    DialogResult = DialogResult.OK;
-                    Close();
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PartyEditForm.SaveSafeAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در ذخیره:\n" + ex.Message);
-            }
-            finally { try { _actionLock.Release(); } catch { } }
+            LogHelper.LogException(ex, "PartyEditForm.SaveSafeAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا در ذخیره:\n" + ex.Message);
         }
+        finally { try { _actionLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyEditForm"); } }
     }
 }

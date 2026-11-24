@@ -1,208 +1,178 @@
 ﻿using ClosedXML.Excel;
-using SMP.Data;
-using SMP.Helpers;
+using Smp.Data;
+using Smp.Helpers;
 using System;
 using System.Data;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class PayrollSummaryForm : Form
 {
-    public class PayrollSummaryForm : Form
+    private readonly PayrollRepository _repository;
+
+    private ComboBox cmbYear = null!, cmbMonth = null!;
+    private ModernButton btnLoad = null!, btnExport = null!;
+    private DataGridView dgvDetails = null!;
+    private DataTable? _currentData;
+
+    private ModernStatCard statGross = null!, statInsEmp = null!, statInsEmpr = null!, statTax = null!, statNet = null!;
+
+    public PayrollSummaryForm(string connectionString)
     {
-        private readonly PayrollRepository _repository;
+        _repository = new PayrollRepository(connectionString);
 
-        private ComboBox cmbYear = null!, cmbMonth = null!;
-        private Button btnLoad = null!, btnExport = null!;
-        private DataGridView dgvDetails = null!;
-        private DataTable? _currentData;
+        BuildUI();
+        ShowInTaskbar = false;
 
-        private Label lblTotalGross = null!, lblTotalInsuranceEmp = null!, lblTotalInsuranceEmpr = null!, lblTotalTax = null!, lblTotalNet = null!;
+        ShortcutHelper.ApplyStandardShortcuts(this, btnSave: btnExport);
 
-        private readonly SemaphoreSlim _loadLock = new(1, 1);
+        LoadDefaults();
+    }
 
-        public PayrollSummaryForm(string connectionString)
+    private void LoadDefaults()
+    {
+        var pc = new PersianCalendar();
+        int currentYear = pc.GetYear(DateTime.Now);
+        int currentMonth = pc.GetMonth(DateTime.Now);
+
+        if (cmbYear.Items.Contains(currentYear)) cmbYear.SelectedItem = currentYear;
+        else if (cmbYear.Items.Count > 0) cmbYear.SelectedIndex = 0;
+
+        if (cmbMonth.Items.Contains(currentMonth)) cmbMonth.SelectedItem = currentMonth;
+        else if (cmbMonth.Items.Count > 0) cmbMonth.SelectedIndex = 0;
+    }
+
+    private void BuildUI()
+    {
+        // ═══════════ ۱. کارت‌های خلاصه ═══════════
+        var strip = ModernReport.CreateStatStrip(5, 76);
+        statGross   = strip.Add("جمع کل حقوق و مزایا", ModernTheme.Primary);
+        statInsEmp  = strip.Add("بیمه سهم کارمند", ModernTheme.Orange);
+        statInsEmpr = strip.Add("بیمه سهم کارفرما", ModernTheme.Purple);
+        statTax     = strip.Add("جمع مالیات", ModernTheme.Danger);
+        statNet     = strip.Add("خالص پرداختی", ModernTheme.Success);
+        ResetLabels();
+        strip.Dock = DockStyle.Fill;
+
+        // ═══════════ ۲. نوار انتخاب سال و ماه ═══════════
+        cmbYear = ModernUI.Combo();
+        ComboBoxHelper.FillYears(cmbYear);
+
+        cmbMonth = ModernUI.Combo();
+        ComboBoxHelper.FillMonths(cmbMonth);
+
+        btnLoad = ModernButton.Primary("نمایش داشبورد", 150, 40);
+        btnLoad.Click += async (s, e) => await LoadDataSafeAsync();
+
+        var toolbar = ModernListKit.BuildToolbar(
+            (ModernListKit.FilterLabel("سال"), 0), (cmbYear, 130),
+            (ModernListKit.FilterLabel("ماه"), 0), (cmbMonth, 150),
+            (btnLoad, 170));
+
+        // ═══════════ ۳. جدول (ستون‌ها از کوئری ساخته می‌شوند) ═══════════
+        dgvDetails = ModernGrid.Create();
+        dgvDetails.AutoGenerateColumns = true;
+        dgvDetails.FillColumns();
+        dgvDetails.UseAiryLook(44);
+        dgvDetails.UseSelectionAccent(ModernTheme.Primary);
+        dgvDetails.EnableThousandsFormatting(includeIntegers: true);
+
+        // ═══════════ ۴. دکمه‌ی پایین ═══════════
+        btnExport = ModernButton.Success("خروجی اکسل", 160, 40);
+        btnExport.Enabled = false;
+        btnExport.Click += async (s, e) => await ExportDataSafeAsync();
+        var actions = ModernListKit.BuildActionBar(new Control[] { btnExport }, new Control[0]);
+
+        ModernListKit.ComposeRows(this, "داشبورد مالی و بیمه",
+            "جمع حقوق، بیمه و مالیات ثبت‌شده در فیش‌های حقوقی هر ماه", new Size(1200, 720),
+            (strip, 88), (toolbar, 56), (ModernReport.WrapGrid(dgvDetails), 0), (actions, 64));
+    }
+
+
+    // ✅ FIX: استفاده از نام ستون‌های انگلیسی برگشتی از GetSavedPayrollsAsync
+    private async Task LoadDataSafeAsync()
+    {
+        if (cmbYear.SelectedItem is null || cmbMonth.SelectedItem is null)
         {
-            _repository = new PayrollRepository(connectionString);
-
-            BuildUI();
-            this.ApplyStandardHeader("داشبورد مالی و بیمه", new Size(1100, 750));
-            ShowInTaskbar = false;
-
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave: btnExport);
-            LoadDefaults();
+            ModernMessageBox.ShowWarning("لطفاً سال و ماه را انتخاب کنید.");
+            return;
         }
 
-        protected override void Dispose(bool disposing)
+        int year = Convert.ToInt32(cmbYear.SelectedItem);
+        int month = Convert.ToInt32(cmbMonth.SelectedItem);
+
+        DataTable? result = null;
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
         {
-            if (disposing) { try { _loadLock?.Dispose(); } catch { } }
-            base.Dispose(disposing);
-        }
+            result = await _repository.GetSavedPayrollsAsync(year, month);
+        }, "در حال بارگذاری اطلاعات...");
 
-        private void LoadDefaults()
+        if (!success || result is null) return;
+
+        _currentData = result;
+
+        if (_currentData.Rows.Count == 0)
         {
-            var pc = new PersianCalendar();
-            int currentYear = pc.GetYear(DateTime.Now);
-            int currentMonth = pc.GetMonth(DateTime.Now);
-
-            if (cmbYear.Items.Contains(currentYear)) cmbYear.SelectedItem = currentYear;
-            else if (cmbYear.Items.Count > 0) cmbYear.SelectedIndex = 0;
-
-            if (cmbMonth.Items.Contains(currentMonth)) cmbMonth.SelectedItem = currentMonth;
-            else if (cmbMonth.Items.Count > 0) cmbMonth.SelectedIndex = 0;
-        }
-
-        private void BuildUI()
-        {
-            // این متد از هلپر جدید استفاده می‌کند
-            var (topRightPanel, topLeftPanel, grid, bottomPanel) = StandardFormHelper.SetupStandardListLayout(
-                this, "داشبورد مالی و بیمه", new Size(1100, 750));
-
-            dgvDetails = grid;
-            dgvDetails.AutoGenerateColumns = true;
-
-            dgvDetails.CellFormatting += (s, e) =>
-            {
-                if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-                if (e.Value is decimal dec) { e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true); e.FormattingApplied = true; }
-                else if (e.Value is int i) { e.Value = NumberHelper.FormatThousands(i, usePersianDigits: true); e.FormattingApplied = true; }
-            };
-
-            // پنل KPI (کارت‌های بالای جدول)
-            var mainTable = this.Controls.OfType<TableLayoutPanel>().FirstOrDefault();
-            if (mainTable != null)
-            {
-                var kpiPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 90, ColumnCount = 5, Padding = new Padding(10) };
-                for (int i = 0; i < 5; i++) kpiPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-
-                lblTotalGross = CreateSummaryCard(kpiPanel, "جمع کل حقوق و مزایا", UIHelper.SectionBlue, 0);
-                lblTotalInsuranceEmp = CreateSummaryCard(kpiPanel, "بیمه سهم کارمند", UIHelper.SectionOrange, 1);
-                lblTotalInsuranceEmpr = CreateSummaryCard(kpiPanel, "بیمه سهم کارفرما", UIHelper.SectionPurple, 2);
-                lblTotalTax = CreateSummaryCard(kpiPanel, "جمع مالیات", UIHelper.ActionRed, 3);
-                lblTotalNet = CreateSummaryCard(kpiPanel, "خالص پرداختی", UIHelper.ActionGreen, 4);
-
-                mainTable.RowCount = 4;
-                mainTable.RowStyles.Clear();
-                mainTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 55F)); // toolbar
-                mainTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 90F)); // KPI
-                mainTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); // grid
-                mainTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F)); // bottom
-
-                mainTable.Controls.Add(kpiPanel, 0, 1);
-                mainTable.SetRow(dgvDetails, 2);
-                mainTable.SetRow(bottomPanel, 3);
-            }
-
-            // نوار بالای جدول (سال، ماه و بارگذاری)
-            cmbYear = new ComboBox { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 8, 10, 5) };
-            for (int i = 1400; i <= 1410; i++) cmbYear.Items.Add(i);
-
-            cmbMonth = new ComboBox { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 8, 10, 5) };
-            for (int i = 1; i <= 12; i++) cmbMonth.Items.Add(i);
-
-            btnLoad = UIHelper.CreateButton("نمایش داشبورد", UIHelper.SectionBlue, 130, 35);
-            btnLoad.Margin = new Padding(5, 3, 10, 5);
-            btnLoad.Click += async (s, e) => await LoadDataSafeAsync();
-
-            topRightPanel.Controls.Add(new Label { Text = "سال:", AutoSize = true, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 13, 5, 5) });
-            topRightPanel.Controls.Add(cmbYear);
-            topRightPanel.Controls.Add(new Label { Text = "ماه:", AutoSize = true, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 13, 5, 5) });
-            topRightPanel.Controls.Add(cmbMonth);
-            topRightPanel.Controls.Add(btnLoad);
-
-            // دکمه خروجی اکسل در نوار پایین
-            btnExport = UIHelper.CreateButton("📥 خروجی اکسل", UIHelper.ActionGreen, 130, 42);
+            ModernMessageBox.ShowWarning("برای این ماه اطلاعاتی ذخیره نشده است.");
+            ResetLabels();
             btnExport.Enabled = false;
-            btnExport.Click += async (s, e) => await ExportDataSafeAsync();
-
-            // ✅ اصلاح: bottomPanel یک FlowLayoutPanel است، پس بدون آرگومان‌های اضافی آیتم اضافه می‌شود
-            bottomPanel.Controls.Add(btnExport);
+            dgvDetails.DataSource = null;
         }
-
-        private Label CreateSummaryCard(TableLayoutPanel parent, string title, Color color, int col)
+        else
         {
-            var card = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Margin = new Padding(5) };
-            card.Paint += (s, e) => { ControlPaint.DrawBorder(e.Graphics, card.ClientRectangle, color, 2, ButtonBorderStyle.Solid, color, 2, ButtonBorderStyle.Solid, color, 2, ButtonBorderStyle.Solid, color, 2, ButtonBorderStyle.Solid); };
+            dgvDetails.DataSource = _currentData;
 
-            var lblTitle = new Label { Text = title, Dock = DockStyle.Top, Height = 25, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(9.5f, FontStyle.Bold), ForeColor = color };
-            var lblValue = new Label { Text = "0", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = UIHelper.PersianFont(13f, FontStyle.Bold), ForeColor = UIHelper.WarmText };
+            // ✅ FIX: نام ستون‌ها = نام‌های واقعی از دیتابیس (چون کوئری p.* است)
+            decimal totalGross = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("TotalEarnings") ?? 0m);
+            decimal totalInsEmp = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("InsuranceEmployee") ?? 0m);
+            decimal totalInsEmpr = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("InsuranceEmployer") ?? 0m);
+            decimal totalTax = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("IncomeTax") ?? 0m);
+            decimal totalNet = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("NetPay") ?? 0m);
 
-            card.Controls.Add(lblValue); card.Controls.Add(lblTitle); parent.Controls.Add(card, col, 0);
-            return lblValue;
+            statGross.SetAmount(totalGross, "ریال");
+            statInsEmp.SetAmount(totalInsEmp, "ریال");
+            statInsEmpr.SetAmount(totalInsEmpr, "ریال");
+            statTax.SetAmount(totalTax, "ریال");
+            statNet.SetAmount(totalNet, "ریال");
+
+            btnExport.Enabled = true;
         }
+    }
 
-        private async Task LoadDataSafeAsync()
+    private void ResetLabels()
+    {
+        statGross.SetAmount(0, "ریال"); statInsEmp.SetAmount(0, "ریال");
+        statInsEmpr.SetAmount(0, "ریال"); statTax.SetAmount(0, "ریال"); statNet.SetAmount(0, "ریال");
+    }
+
+    private async Task ExportDataSafeAsync()
+    {
+        if (_currentData is null || _currentData.Rows.Count == 0) return;
+
+        using var sfd = new SaveFileDialog
         {
-            if (cmbYear.SelectedItem == null || cmbMonth.SelectedItem == null || IsDisposed) return;
-            if (!await _loadLock.WaitAsync(0)) return;
+            Filter = "Excel Files|*.xlsx",
+            FileName = $"PayrollSummary_{cmbYear.SelectedItem}_{cmbMonth.SelectedItem}.xlsx",
+            Title = "ذخیره گزارش مالی",
+            OverwritePrompt = true
+        };
 
-            try
-            {
-                int year = Convert.ToInt32(cmbYear.SelectedItem);
-                int month = Convert.ToInt32(cmbMonth.SelectedItem);
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
 
-                DataTable? result = null;
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    result = await _repository.GetSavedPayrollsAsync(year, month);
-                }, "در حال بارگذاری اطلاعات...");
-
-                if (!success || result == null || IsDisposed) return;
-
-                _currentData = result;
-
-                if (_currentData.Rows.Count == 0)
-                {
-                    ModernMessageBox.ShowWarning("برای این ماه اطلاعاتی ذخیره نشده است.");
-                    ResetLabels(); btnExport.Enabled = false; dgvDetails.DataSource = null;
-                }
-                else
-                {
-                    dgvDetails.DataSource = _currentData;
-
-                    decimal totalGross = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("TotalEarnings") ?? 0m);
-                    decimal totalInsEmp = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("InsuranceEmployee") ?? 0m);
-                    decimal totalInsEmpr = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("InsuranceEmployer") ?? 0m);
-                    decimal totalTax = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("IncomeTax") ?? 0m);
-                    decimal totalNet = _currentData.AsEnumerable().Sum(r => r.Field<decimal?>("NetPay") ?? 0m);
-
-                    lblTotalGross.Text = NumberHelper.FormatThousands(totalGross, usePersianDigits: true);
-                    lblTotalInsuranceEmp.Text = NumberHelper.FormatThousands(totalInsEmp, usePersianDigits: true);
-                    lblTotalInsuranceEmpr.Text = NumberHelper.FormatThousands(totalInsEmpr, usePersianDigits: true);
-                    lblTotalTax.Text = NumberHelper.FormatThousands(totalTax, usePersianDigits: true);
-                    lblTotalNet.Text = NumberHelper.FormatThousands(totalNet, usePersianDigits: true);
-
-                    btnExport.Enabled = true;
-                }
-            }
-            catch (Exception ex) { LogHelper.LogException(ex, "PayrollSummaryForm.LoadDataSafeAsync"); if (!IsDisposed) ModernMessageBox.ShowError(ex.Message); }
-            finally { try { _loadLock.Release(); } catch { } }
-        }
-
-        private void ResetLabels()
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
         {
-            lblTotalGross.Text = "0"; lblTotalInsuranceEmp.Text = "0";
-            lblTotalInsuranceEmpr.Text = "0"; lblTotalTax.Text = "0"; lblTotalNet.Text = "0";
-        }
+            await Task.Yield();
+            ExcelExportHelper.ExportDataGridViewToExcel(dgvDetails, sfd.FileName, "گزارش مالی");
+        }, "در حال تولید فایل اکسل...");
 
-        private async Task ExportDataSafeAsync()
+        if (success)
         {
-            if (_currentData == null || _currentData.Rows.Count == 0 || IsDisposed) return;
-
-            using var sfd = new SaveFileDialog { Filter = "Excel Files|*.xlsx", FileName = $"PayrollSummary_{cmbYear.SelectedItem}_{cmbMonth.SelectedItem}.xlsx", Title = "ذخیره گزارش مالی", OverwritePrompt = true };
-            if (sfd.ShowDialog(this) != DialogResult.OK) return;
-
-            bool success = await AsyncHelper.RunWithLoading(this, async () =>
-            {
-                await Task.Yield();
-                ExcelExportHelper.ExportDataGridViewToExcel(dgvDetails, sfd.FileName, "گزارش مالی");
-            }, "در حال تولید فایل اکسل...");
-
-            if (success && !IsDisposed) { ToastHelper.Show("فایل اکسل با موفقیت ذخیره شد.", isSuccess: true); }
+            ToastHelper.Show("فایل اکسل با موفقیت ذخیره شد.", isSuccess: true);
         }
     }
 }

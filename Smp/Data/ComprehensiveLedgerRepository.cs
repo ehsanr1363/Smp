@@ -4,55 +4,55 @@ using System.Data;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 
-namespace SMP.Data
+namespace Smp.Data;
+
+public class ComprehensiveLedgerRepository
 {
-    public class ComprehensiveLedgerRepository
+    private readonly string _connectionString;
+
+    public ComprehensiveLedgerRepository(string connectionString)
     {
-        private readonly string _connectionString;
+        _connectionString = connectionString;
+    }
 
-        public ComprehensiveLedgerRepository(string connectionString)
-        {
-            _connectionString = connectionString;
-        }
+    public async Task<List<string>> GetDistinctContractsAsync()
+    {
+        var list = new List<string>();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
 
-        public async Task<List<string>> GetDistinctContractsAsync()
-        {
-            var list = new List<string>();
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-
-            string sql = @"
+        string sql = @"
                 SELECT DISTINCT ContractTitle FROM CashTransactions WHERE ContractTitle IS NOT NULL AND ContractTitle <> ''
                 UNION
                 SELECT DISTINCT ContractTitle FROM CashChecks WHERE ContractTitle IS NOT NULL AND ContractTitle <> ''
                 ORDER BY ContractTitle";
 
-            using var cmd = new SqlCommand(sql, conn);
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                list.Add(reader.GetString(0));
-            }
-            return list;
-        }
-
-        public async Task<DataTable> GetFilteredLedgerAsync(string search, string contractFilter, string scopeFilter, string partyFilter)
+        using var cmd = new SqlCommand(sql, conn);
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
+            list.Add(reader.GetString(0));
+        }
+        return list;
+    }
 
-            string whereClause = " WHERE 1=1 ";
-            if (!string.IsNullOrWhiteSpace(search))
-                whereClause += " AND (PartyName LIKE @Search OR Contract LIKE @Search OR Reference LIKE @Search OR Description LIKE @Search OR AccountTitle LIKE @Search) ";
-            if (!string.IsNullOrWhiteSpace(contractFilter) && contractFilter != "همه قراردادها")
-                whereClause += " AND Contract = @Contract ";
-            if (!string.IsNullOrWhiteSpace(scopeFilter) && scopeFilter != "همه")
-                whereClause += " AND (CASE WHEN PaymentScope = N'Administrative' THEN N'اداری' WHEN PaymentScope = N'DirectPurchase' THEN N'خرید مستقیم پروژه' WHEN PaymentScope = N'InformalContractor' THEN N'پیمانکار بدون قرارداد' WHEN PaymentScope = N'ContractorContract' THEN N'پیمانکار دارای قرارداد' ELSE N'---' END) = @Scope ";
-            if (!string.IsNullOrWhiteSpace(partyFilter))
-                whereClause += " AND PartyName LIKE @Party ";
+    public async Task<DataTable> GetFilteredLedgerAsync(string search, string contractFilter, string scopeFilter, string partyFilter)
+    {
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
 
-            // ✅ محاسبه دقیق مانده به صورت تفکیک‌شده برای هر حساب بانکی (حذف تراکنش‌های دستی انتقال برای جلوگیری از دوباره‌شماری)
-            string sql = $@"
+        string whereClause = " WHERE 1=1 ";
+        if (!string.IsNullOrWhiteSpace(search))
+            whereClause += " AND (PartyName LIKE @Search OR Contract LIKE @Search OR Reference LIKE @Search OR Description LIKE @Search OR AccountTitle LIKE @Search) ";
+        if (!string.IsNullOrWhiteSpace(contractFilter) && contractFilter != "همه قراردادها")
+            whereClause += " AND Contract = @Contract ";
+        if (!string.IsNullOrWhiteSpace(scopeFilter) && scopeFilter != "همه")
+            whereClause += " AND (CASE WHEN PaymentScope = N'Administrative' THEN N'اداری' WHEN PaymentScope = N'DirectPurchase' THEN N'خرید مستقیم پروژه' WHEN PaymentScope = N'InformalContractor' THEN N'پیمانکار بدون قرارداد' WHEN PaymentScope = N'ContractorContract' THEN N'پیمانکار دارای قرارداد' ELSE N'---' END) = @Scope ";
+        if (!string.IsNullOrWhiteSpace(partyFilter))
+            whereClause += " AND PartyName LIKE @Party ";
+
+        // ✅ محاسبه دقیق مانده به صورت تفکیک‌شده برای هر حساب بانکی (حذف تراکنش‌های دستی انتقال برای جلوگیری از دوباره‌شماری)
+        string sql = $@"
                 WITH CombinedLedger AS (
                     SELECT 
                         t.Id,
@@ -71,7 +71,7 @@ namespace SMP.Data
                         N'ثبت شده' AS [Status],
                         ISNULL(t.Description, N'---') AS [Description]
                     FROM CashTransactions t
-                    WHERE ISNULL(t.Category, '') <> N'انتقال بین حساب‌ها' -- ✅ حذف تراکنش‌های دستی انتقال
+                    WHERE (ISNULL(t.Category, '') <> N'انتقال بین حساب‌ها' OR (t.TankhahListId IS NOT NULL AND t.AccountId IS NOT NULL) OR (t.TankhahListId IS NULL AND t.AccountId IS NOT NULL AND t.Direction = N'پرداختی' AND ISNULL(t.Description, N'') LIKE N'شارژ تنخواه%')) -- ✅ انتقال‌های دستی حذف می‌شوند (از AccountTransfers می‌آیند) ولی شارژ تنخواه نمایش داده می‌شود
                     
                     UNION ALL
                     
@@ -107,9 +107,9 @@ namespace SMP.Data
                         N'---',
                         N'---',
                         N'---',
-                        at.Amount,
+                        at.Amount + ISNULL(at.TransferFee, 0),
                         0 AS [Debit],
-                        at.Amount AS [Credit],
+                        at.Amount + ISNULL(at.TransferFee, 0) AS [Credit],
                         N'ثبت شده',
                         N'انتقال به حساب مقصد. شرح: ' + ISNULL(at.Description, N'---')
                     FROM AccountTransfers at
@@ -151,20 +151,19 @@ namespace SMP.Data
                 {whereClause}
                 ORDER BY [Date] ASC, Id ASC, [Type] ASC";
 
-            using var cmd = new SqlCommand(sql, conn);
-            if (!string.IsNullOrWhiteSpace(search))
-                cmd.Parameters.AddWithValue("@Search", $"%{search.Trim()}%");
-            if (!string.IsNullOrWhiteSpace(contractFilter) && contractFilter != "همه قراردادها")
-                cmd.Parameters.AddWithValue("@Contract", contractFilter);
-            if (!string.IsNullOrWhiteSpace(scopeFilter) && scopeFilter != "همه")
-                cmd.Parameters.AddWithValue("@Scope", scopeFilter);
-            if (!string.IsNullOrWhiteSpace(partyFilter))
-                cmd.Parameters.AddWithValue("@Party", $"%{partyFilter.Trim()}%");
+        using var cmd = new SqlCommand(sql, conn);
+        if (!string.IsNullOrWhiteSpace(search))
+            cmd.Parameters.AddWithValue("@Search", $"%{search.Trim()}%");
+        if (!string.IsNullOrWhiteSpace(contractFilter) && contractFilter != "همه قراردادها")
+            cmd.Parameters.AddWithValue("@Contract", contractFilter);
+        if (!string.IsNullOrWhiteSpace(scopeFilter) && scopeFilter != "همه")
+            cmd.Parameters.AddWithValue("@Scope", scopeFilter);
+        if (!string.IsNullOrWhiteSpace(partyFilter))
+            cmd.Parameters.AddWithValue("@Party", $"%{partyFilter.Trim()}%");
 
-            using var adapter = new SqlDataAdapter(cmd);
-            var dt = new DataTable();
-            await Task.Run(() => adapter.Fill(dt));
-            return dt;
-        }
+        using var adapter = new SqlDataAdapter(cmd);
+        var dt = new DataTable();
+        await Task.Run(() => adapter.Fill(dt));
+        return dt;
     }
 }

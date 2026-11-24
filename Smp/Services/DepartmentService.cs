@@ -1,37 +1,36 @@
 ﻿using System.Collections.Generic;
-using SMP.Data;
-using SMP.Models;
+using Smp.Data;
+using Smp.Models;
 
-namespace SMP.Services
+namespace Smp.Services;
+
+public class DepartmentService
 {
-    public class DepartmentService
+    private readonly DepartmentRepository _departmentRepository;
+
+    public DepartmentService(DepartmentRepository departmentRepository)
     {
-        private readonly DepartmentRepository _departmentRepository;
+        _departmentRepository = departmentRepository;
+    }
 
-        public DepartmentService(DepartmentRepository departmentRepository)
-        {
-            _departmentRepository = departmentRepository;
-        }
+    public List<Department> GetAll()
+    {
+        return _departmentRepository.GetAll();
+    }
 
-        public List<Department> GetAll()
-        {
-            return _departmentRepository.GetAll();
-        }
+    public void Add(Department dept)
+    {
+        _departmentRepository.Add(dept);
+    }
 
-        public void Add(Department dept)
-        {
-            _departmentRepository.Add(dept);
-        }
+    // 🌟 متد Update که خطای فعلی را برطرف می‌کند
+    public void Update(Department dept)
+    {
+        _departmentRepository.Update(dept);
+    }
 
-        // 🌟 متد Update که خطای فعلی را برطرف می‌کند
-        public void Update(Department dept)
-        {
-            _departmentRepository.Update(dept);
-        }
-
-        public void Delete(int id)
-        {
-            _departmentRepository.Delete(id);
-        }
+    public void Delete(int id)
+    {
+        _departmentRepository.Delete(id);
     }
 }

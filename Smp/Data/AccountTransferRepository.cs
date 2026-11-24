@@ -2,193 +2,207 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
-using SMP.Models;
+using Smp.Models;
 
-namespace SMP.Data
+namespace Smp.Data;
+
+public class AccountTransferRepository
 {
-    public class AccountTransferRepository
+    private readonly string _connectionString;
+
+    public AccountTransferRepository(string connectionString)
     {
-        private readonly string _connectionString;
+        _connectionString = connectionString;
+    }
 
-        public AccountTransferRepository(string connectionString)
+    public async Task AddAsync(AccountTransfer transfer)
+    {
+        if (transfer is null) throw new ArgumentNullException(nameof(transfer));
+        if (transfer.Amount <= 0) throw new InvalidOperationException("مبلغ انتقال باید بزرگتر از صفر باشد.");
+        if (transfer.TransferFee < 0) throw new InvalidOperationException("کارمزد نمی‌تواند منفی باشد.");
+        if (transfer.SourceAccountId == transfer.DestinationAccountId)
+            throw new InvalidOperationException("حساب مبدا و مقصد نمی‌توانند یکسان باشند.");
+
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
         {
-            _connectionString = connectionString;
-        }
-
-        public async Task AddAsync(AccountTransfer transfer)
-        {
-            if (transfer == null) throw new ArgumentNullException(nameof(transfer));
-            if (transfer.Amount <= 0) throw new InvalidOperationException("مبلغ انتقال باید بزرگتر از صفر باشد.");
-            if (transfer.SourceAccountId == transfer.DestinationAccountId)
-                throw new InvalidOperationException("حساب مبدا و مقصد نمی‌توانند یکسان باشند.");
-
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
-
-            try
-            {
-                string sql = @"
+            string sql = @"
                     INSERT INTO AccountTransfers (SourceAccountId, DestinationAccountId, Amount, TransferFee, TransferDate, Description, CreatedAt, TransferType)
-                    VALUES (@SrcId, @DestId, @Amount, 0, @Date, @Desc, GETDATE(), @TransferType);
+                    VALUES (@SrcId, @DestId, @Amount, @Fee, @Date, @Desc, GETDATE(), @TransferType);
                     SELECT SCOPE_IDENTITY();";
 
-                using var cmd = new SqlCommand(sql, conn, transaction);
-                cmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
-                cmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
-                cmd.Parameters.AddWithValue("@Amount", transfer.Amount);
-                cmd.Parameters.AddWithValue("@Date", transfer.TransferDate);
-                cmd.Parameters.AddWithValue("@Desc", (object?)transfer.Description ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@TransferType", (object?)transfer.TransferType ?? DBNull.Value);
+            using var cmd = new SqlCommand(sql, conn, transaction);
+            cmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
+            cmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
+            cmd.Parameters.AddWithValue("@Amount", transfer.Amount);
+            cmd.Parameters.AddWithValue("@Fee", transfer.TransferFee);
+            cmd.Parameters.AddWithValue("@Date", transfer.TransferDate);
+            cmd.Parameters.AddWithValue("@Desc", (object?)transfer.Description ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@TransferType", (object?)transfer.TransferType ?? DBNull.Value);
 
-                var result = await cmd.ExecuteScalarAsync();
-                transfer.Id = result != null && result != DBNull.Value ? Convert.ToInt32(result) : 0;
+            var result = await cmd.ExecuteScalarAsync();
+            transfer.Id = result is not null && result != DBNull.Value ? Convert.ToInt32(result) : 0;
 
-                using (var balCmd = new SqlCommand(@"
-                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance - @Amount WHERE Id = @SrcId;
+            using (var balCmd = new SqlCommand(@"
+                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance - (@Amount + @Fee) WHERE Id = @SrcId;
                     UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance + @Amount WHERE Id = @DestId;", conn, transaction))
-                {
-                    balCmd.Parameters.AddWithValue("@Amount", transfer.Amount);
-                    balCmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
-                    balCmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
-                    await balCmd.ExecuteNonQueryAsync();
-                }
-
-                await transaction.CommitAsync();
-            }
-            catch
             {
-                await transaction.RollbackAsync();
-                throw;
+                balCmd.Parameters.AddWithValue("@Amount", transfer.Amount);
+                balCmd.Parameters.AddWithValue("@Fee", transfer.TransferFee);
+                balCmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
+                balCmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
+                await balCmd.ExecuteNonQueryAsync();
             }
+
+
+            await transaction.CommitAsync();
         }
-
-        public async Task UpdateAsync(AccountTransfer transfer)
+        catch
         {
-            if (transfer == null) throw new ArgumentNullException(nameof(transfer));
-            if (transfer.Id <= 0) throw new ArgumentException("شناسه انتقال نامعتبر است.");
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("ثبت", "انتقال بین حساب‌ها", $"شناسه {transfer.Id}، مبلغ {transfer.Amount:N0}");
+    }
 
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
+    public async Task UpdateAsync(AccountTransfer transfer)
+    {
+        if (transfer is null) throw new ArgumentNullException(nameof(transfer));
+        if (transfer.Id <= 0) throw new ArgumentException("شناسه انتقال نامعتبر است.");
 
-            try
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
+        {
+            int oldSrcId, oldDestId;
+            decimal oldAmount, oldFee;
+
+            using (var readCmd = new SqlCommand("SELECT SourceAccountId, DestinationAccountId, Amount, ISNULL(TransferFee,0) FROM AccountTransfers WITH (UPDLOCK, ROWLOCK) WHERE Id = @Id", conn, transaction))
             {
-                int oldSrcId, oldDestId;
-                decimal oldAmount;
+                readCmd.Parameters.AddWithValue("@Id", transfer.Id);
+                using var reader = await readCmd.ExecuteReaderAsync();
+                if (!await reader.ReadAsync()) throw new InvalidOperationException("انتقال مورد نظر یافت نشد.");
+                oldSrcId = reader.GetInt32(0);
+                oldDestId = reader.GetInt32(1);
+                oldAmount = reader.GetDecimal(2);
+                oldFee = reader.GetDecimal(3);
+            }
 
-                using (var readCmd = new SqlCommand("SELECT SourceAccountId, DestinationAccountId, Amount FROM AccountTransfers WHERE Id = @Id", conn, transaction))
-                {
-                    readCmd.Parameters.AddWithValue("@Id", transfer.Id);
-                    using var reader = await readCmd.ExecuteReaderAsync();
-                    if (!await reader.ReadAsync()) throw new InvalidOperationException("انتقال مورد نظر یافت نشد.");
-                    oldSrcId = reader.GetInt32(0);
-                    oldDestId = reader.GetInt32(1);
-                    oldAmount = reader.GetDecimal(2);
-                }
-
-                using (var revCmd = new SqlCommand(@"
-                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance + @Amount WHERE Id = @OldSrcId;
+            using (var revCmd = new SqlCommand(@"
+                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance + (@Amount + @OldFee) WHERE Id = @OldSrcId;
                     UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance - @Amount WHERE Id = @OldDestId;", conn, transaction))
-                {
-                    revCmd.Parameters.AddWithValue("@Amount", oldAmount);
-                    revCmd.Parameters.AddWithValue("@OldSrcId", oldSrcId);
-                    revCmd.Parameters.AddWithValue("@OldDestId", oldDestId);
-                    await revCmd.ExecuteNonQueryAsync();
-                }
+            {
+                revCmd.Parameters.AddWithValue("@Amount", oldAmount);
+                revCmd.Parameters.AddWithValue("@OldFee", oldFee);
+                revCmd.Parameters.AddWithValue("@OldSrcId", oldSrcId);
+                revCmd.Parameters.AddWithValue("@OldDestId", oldDestId);
+                await revCmd.ExecuteNonQueryAsync();
+            }
 
-                string sql = @"
+            string sql = @"
                     UPDATE AccountTransfers SET 
                         SourceAccountId = @SrcId, DestinationAccountId = @DestId, 
-                        Amount = @Amount, TransferFee = 0, TransferDate = @Date, Description = @Desc,
+                        Amount = @Amount, TransferFee = @Fee, TransferDate = @Date, Description = @Desc,
                         TransferType = @TransferType
                     WHERE Id = @Id";
 
-                using (var cmd = new SqlCommand(sql, conn, transaction))
-                {
-                    cmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
-                    cmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
-                    cmd.Parameters.AddWithValue("@Amount", transfer.Amount);
-                    cmd.Parameters.AddWithValue("@Date", transfer.TransferDate);
-                    cmd.Parameters.AddWithValue("@Desc", (object?)transfer.Description ?? DBNull.Value);
-                    cmd.Parameters.AddWithValue("@TransferType", (object?)transfer.TransferType ?? DBNull.Value);
-                    cmd.Parameters.AddWithValue("@Id", transfer.Id);
-                    await cmd.ExecuteNonQueryAsync();
-                }
+            using (var cmd = new SqlCommand(sql, conn, transaction))
+            {
+                cmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
+                cmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
+                cmd.Parameters.AddWithValue("@Amount", transfer.Amount);
+                cmd.Parameters.AddWithValue("@Fee", transfer.TransferFee);
+                cmd.Parameters.AddWithValue("@Date", transfer.TransferDate);
+                cmd.Parameters.AddWithValue("@Desc", (object?)transfer.Description ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@TransferType", (object?)transfer.TransferType ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Id", transfer.Id);
+                await cmd.ExecuteNonQueryAsync();
+            }
 
-                using (var balCmd = new SqlCommand(@"
-                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance - @Amount WHERE Id = @SrcId;
+            using (var balCmd = new SqlCommand(@"
+                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance - (@Amount + @Fee) WHERE Id = @SrcId;
                     UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance + @Amount WHERE Id = @DestId;", conn, transaction))
-                {
-                    balCmd.Parameters.AddWithValue("@Amount", transfer.Amount);
-                    balCmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
-                    balCmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
-                    await balCmd.ExecuteNonQueryAsync();
-                }
-
-                await transaction.CommitAsync();
-            }
-            catch
             {
-                await transaction.RollbackAsync();
-                throw;
+                balCmd.Parameters.AddWithValue("@Amount", transfer.Amount);
+                balCmd.Parameters.AddWithValue("@Fee", transfer.TransferFee);
+                balCmd.Parameters.AddWithValue("@SrcId", transfer.SourceAccountId);
+                balCmd.Parameters.AddWithValue("@DestId", transfer.DestinationAccountId);
+                await balCmd.ExecuteNonQueryAsync();
             }
+
+
+            await transaction.CommitAsync();
         }
-
-        public async Task DeleteAsync(int id)
+        catch
         {
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
-            using var transaction = conn.BeginTransaction();
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("ویرایش", "انتقال بین حساب‌ها", $"شناسه {transfer.Id}، مبلغ {transfer.Amount:N0}");
+    }
 
-            try
+    public async Task DeleteAsync(int id)
+    {
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        using var transaction = conn.BeginTransaction();
+
+        try
+        {
+            int srcId, destId;
+            decimal amount, fee;
+
+            using (var readCmd = new SqlCommand("SELECT SourceAccountId, DestinationAccountId, Amount, ISNULL(TransferFee,0) FROM AccountTransfers WITH (UPDLOCK, ROWLOCK) WHERE Id = @Id", conn, transaction))
             {
-                int srcId, destId;
-                decimal amount;
+                readCmd.Parameters.AddWithValue("@Id", id);
+                using var reader = await readCmd.ExecuteReaderAsync();
+                if (!await reader.ReadAsync()) throw new InvalidOperationException("انتقال مورد نظر یافت نشد.");
+                srcId = reader.GetInt32(0);
+                destId = reader.GetInt32(1);
+                amount = reader.GetDecimal(2);
+                fee = reader.GetDecimal(3);
+            }
 
-                using (var readCmd = new SqlCommand("SELECT SourceAccountId, DestinationAccountId, Amount FROM AccountTransfers WHERE Id = @Id", conn, transaction))
-                {
-                    readCmd.Parameters.AddWithValue("@Id", id);
-                    using var reader = await readCmd.ExecuteReaderAsync();
-                    if (!await reader.ReadAsync()) throw new InvalidOperationException("انتقال مورد نظر یافت نشد.");
-                    srcId = reader.GetInt32(0);
-                    destId = reader.GetInt32(1);
-                    amount = reader.GetDecimal(2);
-                }
+            using (var delCmd = new SqlCommand("DELETE FROM AccountTransfers WHERE Id = @Id", conn, transaction))
+            {
+                delCmd.Parameters.AddWithValue("@Id", id);
+                await delCmd.ExecuteNonQueryAsync();
+            }
 
-                using (var delCmd = new SqlCommand("DELETE FROM AccountTransfers WHERE Id = @Id", conn, transaction))
-                {
-                    delCmd.Parameters.AddWithValue("@Id", id);
-                    await delCmd.ExecuteNonQueryAsync();
-                }
-
-                using (var balCmd = new SqlCommand(@"
-                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance + @Amount WHERE Id = @SrcId;
+            using (var balCmd = new SqlCommand(@"
+                    UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance + (@Amount + @Fee) WHERE Id = @SrcId;
                     UPDATE CompanyBankAccounts SET CurrentBalance = CurrentBalance - @Amount WHERE Id = @DestId;", conn, transaction))
-                {
-                    balCmd.Parameters.AddWithValue("@Amount", amount);
-                    balCmd.Parameters.AddWithValue("@SrcId", srcId);
-                    balCmd.Parameters.AddWithValue("@DestId", destId);
-                    await balCmd.ExecuteNonQueryAsync();
-                }
-
-                await transaction.CommitAsync();
-            }
-            catch
             {
-                await transaction.RollbackAsync();
-                throw;
+                balCmd.Parameters.AddWithValue("@Amount", amount);
+                balCmd.Parameters.AddWithValue("@Fee", fee);
+                balCmd.Parameters.AddWithValue("@SrcId", srcId);
+                balCmd.Parameters.AddWithValue("@DestId", destId);
+                await balCmd.ExecuteNonQueryAsync();
             }
+
+            await transaction.CommitAsync();
         }
-
-        // ✅ متد جدید: دریافت تمام انتقالات مربوط به یک حساب
-        public async Task<List<AccountTransfer>> GetByAccountIdAsync(int accountId)
+        catch
         {
-            var list = new List<AccountTransfer>();
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
+            await transaction.RollbackAsync();
+            throw;
+        }
+        Smp.Helpers.AuditHelper.Log("حذف", "انتقال بین حساب‌ها", $"شناسه {id}");
+    }
 
-            string query = @"
+    // ✅ متد جدید: دریافت تمام انتقالات مربوط به یک حساب
+    public async Task<List<AccountTransfer>> GetByAccountIdAsync(int accountId)
+    {
+        var list = new List<AccountTransfer>();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        string query = @"
                 SELECT t.*, 
                        ISNULL(s.Title, N'حساب حذف شده') AS SourceAccountTitle, 
                        ISNULL(d.Title, N'حساب حذف شده') AS DestinationAccountTitle
@@ -198,37 +212,37 @@ namespace SMP.Data
                 WHERE t.SourceAccountId = @Id OR t.DestinationAccountId = @Id
                 ORDER BY t.TransferDate DESC, t.Id DESC";
 
-            using var cmd = new SqlCommand(query, conn);
-            cmd.Parameters.AddWithValue("@Id", accountId);
-            using var reader = await cmd.ExecuteReaderAsync();
+        using var cmd = new SqlCommand(query, conn);
+        cmd.Parameters.AddWithValue("@Id", accountId);
+        using var reader = await cmd.ExecuteReaderAsync();
 
-            while (await reader.ReadAsync())
-            {
-                list.Add(new AccountTransfer
-                {
-                    Id = reader["Id"] != DBNull.Value ? Convert.ToInt32(reader["Id"]) : 0,
-                    SourceAccountId = reader["SourceAccountId"] != DBNull.Value ? Convert.ToInt32(reader["SourceAccountId"]) : 0,
-                    SourceAccountTitle = reader["SourceAccountTitle"]?.ToString() ?? "",
-                    DestinationAccountId = reader["DestinationAccountId"] != DBNull.Value ? Convert.ToInt32(reader["DestinationAccountId"]) : 0,
-                    DestinationAccountTitle = reader["DestinationAccountTitle"]?.ToString() ?? "",
-                    Amount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0,
-                    TransferFee = reader["TransferFee"] != DBNull.Value ? Convert.ToDecimal(reader["TransferFee"]) : 0,
-                    TransferDate = reader["TransferDate"] != DBNull.Value ? Convert.ToDateTime(reader["TransferDate"]) : DateTime.Now,
-                    Description = reader["Description"] != DBNull.Value ? reader["Description"].ToString() : null,
-                    CreatedAt = reader["CreatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["CreatedAt"]) : DateTime.Now,
-                    TransferType = reader["TransferType"] != DBNull.Value ? reader["TransferType"].ToString() : null
-                });
-            }
-            return list;
-        }
-
-        public async Task<List<AccountTransfer>> GetAllAsync()
+        while (await reader.ReadAsync())
         {
-            var list = new List<AccountTransfer>();
-            using var conn = new SqlConnection(_connectionString);
-            await conn.OpenAsync();
+            list.Add(new AccountTransfer
+            {
+                Id = reader["Id"] != DBNull.Value ? Convert.ToInt32(reader["Id"]) : 0,
+                SourceAccountId = reader["SourceAccountId"] != DBNull.Value ? Convert.ToInt32(reader["SourceAccountId"]) : 0,
+                SourceAccountTitle = reader["SourceAccountTitle"]?.ToString() ?? "",
+                DestinationAccountId = reader["DestinationAccountId"] != DBNull.Value ? Convert.ToInt32(reader["DestinationAccountId"]) : 0,
+                DestinationAccountTitle = reader["DestinationAccountTitle"]?.ToString() ?? "",
+                Amount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0,
+                TransferFee = reader["TransferFee"] != DBNull.Value ? Convert.ToDecimal(reader["TransferFee"]) : 0,
+                TransferDate = reader["TransferDate"] != DBNull.Value ? Convert.ToDateTime(reader["TransferDate"]) : DateTime.Now,
+                Description = reader["Description"] != DBNull.Value ? reader["Description"].ToString() : null,
+                CreatedAt = reader["CreatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["CreatedAt"]) : DateTime.Now,
+                TransferType = reader["TransferType"] != DBNull.Value ? reader["TransferType"].ToString() : null
+            });
+        }
+        return list;
+    }
 
-            string query = @"
+    public async Task<List<AccountTransfer>> GetAllAsync()
+    {
+        var list = new List<AccountTransfer>();
+        using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        string query = @"
                 SELECT t.*, 
                        ISNULL(s.Title, N'حساب حذف شده') AS SourceAccountTitle, 
                        ISNULL(d.Title, N'حساب حذف شده') AS DestinationAccountTitle
@@ -237,27 +251,26 @@ namespace SMP.Data
                 LEFT JOIN CompanyBankAccounts d ON t.DestinationAccountId = d.Id
                 ORDER BY t.TransferDate DESC, t.Id DESC";
 
-            using var cmd = new SqlCommand(query, conn);
-            using var reader = await cmd.ExecuteReaderAsync();
+        using var cmd = new SqlCommand(query, conn);
+        using var reader = await cmd.ExecuteReaderAsync();
 
-            while (await reader.ReadAsync())
+        while (await reader.ReadAsync())
+        {
+            list.Add(new AccountTransfer
             {
-                list.Add(new AccountTransfer
-                {
-                    Id = reader["Id"] != DBNull.Value ? Convert.ToInt32(reader["Id"]) : 0,
-                    SourceAccountId = reader["SourceAccountId"] != DBNull.Value ? Convert.ToInt32(reader["SourceAccountId"]) : 0,
-                    SourceAccountTitle = reader["SourceAccountTitle"]?.ToString() ?? "",
-                    DestinationAccountId = reader["DestinationAccountId"] != DBNull.Value ? Convert.ToInt32(reader["DestinationAccountId"]) : 0,
-                    DestinationAccountTitle = reader["DestinationAccountTitle"]?.ToString() ?? "",
-                    Amount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0,
-                    TransferFee = reader["TransferFee"] != DBNull.Value ? Convert.ToDecimal(reader["TransferFee"]) : 0,
-                    TransferDate = reader["TransferDate"] != DBNull.Value ? Convert.ToDateTime(reader["TransferDate"]) : DateTime.Now,
-                    Description = reader["Description"] != DBNull.Value ? reader["Description"].ToString() : null,
-                    CreatedAt = reader["CreatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["CreatedAt"]) : DateTime.Now,
-                    TransferType = reader["TransferType"] != DBNull.Value ? reader["TransferType"].ToString() : null
-                });
-            }
-            return list;
+                Id = reader["Id"] != DBNull.Value ? Convert.ToInt32(reader["Id"]) : 0,
+                SourceAccountId = reader["SourceAccountId"] != DBNull.Value ? Convert.ToInt32(reader["SourceAccountId"]) : 0,
+                SourceAccountTitle = reader["SourceAccountTitle"]?.ToString() ?? "",
+                DestinationAccountId = reader["DestinationAccountId"] != DBNull.Value ? Convert.ToInt32(reader["DestinationAccountId"]) : 0,
+                DestinationAccountTitle = reader["DestinationAccountTitle"]?.ToString() ?? "",
+                Amount = reader["Amount"] != DBNull.Value ? Convert.ToDecimal(reader["Amount"]) : 0,
+                TransferFee = reader["TransferFee"] != DBNull.Value ? Convert.ToDecimal(reader["TransferFee"]) : 0,
+                TransferDate = reader["TransferDate"] != DBNull.Value ? Convert.ToDateTime(reader["TransferDate"]) : DateTime.Now,
+                Description = reader["Description"] != DBNull.Value ? reader["Description"].ToString() : null,
+                CreatedAt = reader["CreatedAt"] != DBNull.Value ? Convert.ToDateTime(reader["CreatedAt"]) : DateTime.Now,
+                TransferType = reader["TransferType"] != DBNull.Value ? reader["TransferType"].ToString() : null
+            });
         }
+        return list;
     }
 }

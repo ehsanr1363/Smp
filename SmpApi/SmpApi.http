@@ -1,0 +1,6 @@
+@SmpApi_HostAddress = http://localhost:5122
+
+GET {{SmpApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,6 +1,6 @@
-﻿using Microsoft.Data.SqlClient;
-using SMP.Helpers;
-using SMP.Services;
+﻿using Smp.Data;
+using Smp.Helpers;
+using Smp.Services;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -10,398 +10,315 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class PartyBankAccountsForm : Form
 {
-    public class PartyBankAccountsForm : Form
+    private readonly PartyRepository _repo;
+    private readonly int _partyId;
+    private readonly string _partyName;
+
+    private DataGridView dgvBanks = null!;
+    private ModernTextBox txtSheba = null!, txtBankName = null!;
+    private ModernButton btnAdd = null!, btnDelete = null!, btnSetMain = null!;
+
+    private readonly Dictionary<string, string> _bankCodes = new();
+
+    // ✅ FIX P2: جلوگیری از تداخل
+    private readonly SemaphoreSlim _loadLock = new(1, 1);
+    private readonly SemaphoreSlim _actionLock = new(1, 1);
+
+    public PartyBankAccountsForm(string connectionString, int partyId, string partyName)
     {
-        private readonly string _connectionString;
-        private readonly int _partyId;
-        private readonly string _partyName;
+        _repo = new PartyRepository(connectionString);
+        _partyId = partyId;
+        _partyName = partyName;
 
-        private DataGridView dgvBanks = null!;
-        private TextBox txtSheba = null!, txtBankName = null!;
-        private Button btnAdd = null!, btnDelete = null!, btnSetMain = null!;
+        BuildUI();
 
-        private readonly Dictionary<string, string> _bankCodes = new();
+        ShortcutHelper.ApplyStandardShortcuts(this, btnSave: btnAdd);
+        ShowInTaskbar = false;
 
-        // ✅ FIX P2: جلوگیری از تداخل
-        private readonly SemaphoreSlim _loadLock = new(1, 1);
-        private readonly SemaphoreSlim _actionLock = new(1, 1);
+        Shown += async (s, e) => await LoadDataSafeAsync();
+    }
 
-        public PartyBankAccountsForm(string connectionString, int partyId, string partyName)
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
         {
-            _connectionString = connectionString;
-            _partyId = partyId;
-            _partyName = partyName;
-
-            BuildUI();
-
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave: btnAdd);
-            ShowInTaskbar = false;
-
-            Shown += async (s, e) => await LoadDataSafeAsync();
+            try { _loadLock?.Dispose(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyBankAccountsForm"); }
+            try { _actionLock?.Dispose(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyBankAccountsForm"); }
         }
+        base.Dispose(disposing);
+    }
 
-        protected override void Dispose(bool disposing)
+    private void BuildUI()
+    {
+        // ── کارت ثبت شبا ──
+        txtSheba = ModernUI.Input(ModernInputKind.Text, "IR000000000000000000000000");
+        txtSheba.TextBox.TextChanged += TxtSheba_TextChanged;
+
+        txtBankName = ModernUI.Input();
+        txtBankName.ReadOnly = true;
+
+        int rh = ModernUI.RowHeight;
+        var card = new ModernCard("ثبت شماره شبای جدید", ModernTheme.Primary,
+            new[] { new ColumnStyle(SizeType.Percent, 60F), new ColumnStyle(SizeType.Percent, 40F) }, rh);
+        card.Body.Controls.Add(ModernUI.Row("شماره شبا (IR...)", txtSheba), 0, 0);
+        card.Body.Controls.Add(ModernUI.Row("نام بانک", txtBankName), 1, 0);
+
+        // ── جدول ──
+        dgvBanks = ModernGrid.Create();
+        dgvBanks.AutoGenerateColumns = false;
+        dgvBanks.AllowUserToAddRows = false;
+        dgvBanks.ReadOnly = true;
+        dgvBanks.MultiSelect = false;
+        dgvBanks.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        dgvBanks.FillColumns();
+        dgvBanks.UseAiryLook(44);
+        dgvBanks.UseSelectionAccent(ModernTheme.Primary);
+
+        dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { Name = "Id", DataPropertyName = "Id", Visible = false });
+        dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { Name = "ShebaNumber", DataPropertyName = "ShebaNumber", HeaderText = "شماره شبا", FillWeight = 40 });
+        dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { Name = "BankName", DataPropertyName = "BankName", HeaderText = "نام بانک", FillWeight = 30 });
+        dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { Name = "IsMainAccount", DataPropertyName = "IsMainAccount", HeaderText = "وضعیت", FillWeight = 15 });
+        ModernListKit.PinHeaders(dgvBanks);   // جلوگیری از جایگزینی هدرها با ترجمه‌ی عمومی ستون
+        dgvBanks.CellFormatting += DgvBanks_CellFormatting;
+
+        // ── دکمه‌ها ──
+        btnAdd = ModernButton.Save("➕ ثبت و افزودن شماره شبا", 230, 38);
+        btnAdd.Click += async (s, e) => await BtnAdd_Click(s, e);
+
+        btnSetMain = ModernButton.Soft("⭐ تنظیم به عنوان حساب اصلی", ModernTheme.Secondary, 230, 38);
+        btnSetMain.Click += async (s, e) => await BtnSetMain_Click(s, e);
+
+        btnDelete = ModernButton.Soft("🗑️ حذف شماره شبا", ModernTheme.Danger, 170, 38);
+        btnDelete.Click += async (s, e) => await BtnDelete_Click(s, e);
+
+        var actions = ModernListKit.BuildActionBar(new Control[] { btnAdd, btnSetMain }, new Control[] { btnDelete });
+
+        ModernListKit.ComposeRows(this, $"حساب‌های بانکی: {_partyName}",
+            "ثبت، حذف و تعیین حساب اصلی طرف حساب", new Size(900, 650),
+            (card, card.Height + 12), (ModernReport.WrapGrid(dgvBanks), 0), (actions, 64));
+    }
+
+    private async Task LoadDataSafeAsync()
+    {
+        if (IsDisposed) return;
+        if (!await _loadLock.WaitAsync(0)) return;
+
+        try
         {
-            if (disposing)
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                try { _loadLock?.Dispose(); } catch { }
-                try { _actionLock?.Dispose(); } catch { }
+                var shebasTask = _repo.GetBankAccountsAsync(_partyId);
+
+                await shebasTask;
+
+                if (IsDisposed) return;
+
+                _bankCodes.Clear();
+                // لیست بانک‌ها از BankHelper خوانده می‌شود (وابسته به جدول Banks دیتابیس نیست)
+                foreach (var kv in BankHelper.BankList)
+                    if (!string.IsNullOrEmpty(kv.Key) && !_bankCodes.ContainsKey(kv.Key))
+                        _bankCodes.Add(kv.Key, kv.Value);
+
+                dgvBanks.DataSource = shebasTask.Result;
+            }, "در حال بارگذاری اطلاعات...");
+
+            if (!success && !IsDisposed) ModernMessageBox.ShowError("خطا در بارگذاری اطلاعات.");
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "PartyBankAccountsForm.LoadDataSafeAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
+        }
+        finally
+        {
+            try { _loadLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyBankAccountsForm"); }
+        }
+    }
+
+    private void TxtSheba_TextChanged(object? sender, EventArgs e)
+    {
+        string sheba = StringHelper.ConvertToEnglishDigits(txtSheba.Text).Trim().Replace(" ", "").ToUpper();
+
+        string? bankCode = null;
+        if (sheba.StartsWith("IR") && sheba.Length >= 7)
+            bankCode = sheba.Substring(4, 3);
+        else if (sheba.Length >= 5)
+            bankCode = sheba.Substring(2, 3);
+
+        if (!string.IsNullOrEmpty(bankCode) && _bankCodes.ContainsKey(bankCode))
+            txtBankName.Text = _bankCodes[bankCode];
+        else
+            txtBankName.Text = "";
+    }
+
+    private void DgvBanks_CellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+        if (dgvBanks.Columns[e.ColumnIndex].Name != "IsMainAccount") return;
+
+        var rowView = dgvBanks.Rows[e.RowIndex].DataBoundItem as DataRowView;
+        if (rowView is null) return;
+
+        int isMain = Convert.ToInt32(rowView["IsMainAccount"]);
+        if (isMain == 1)
+        {
+            e.Value = "⭐ حساب اصلی";
+            e.CellStyle.ForeColor = ModernTheme.Secondary;
+            e.CellStyle.Font = ModernTheme.GetFont(11f, FontStyle.Bold);
+        }
+        else
+        {
+            e.Value = "-";
+            e.CellStyle.ForeColor = ModernTheme.Text;
+        }
+        e.FormattingApplied = true;
+    }
+
+    private async Task BtnAdd_Click(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        if (!await _actionLock.WaitAsync(0)) return;
+
+        try
+        {
+            string rawSheba = txtSheba.Text.Trim();
+            string normalizedSheba = BankHelper.NormalizeSheba(rawSheba);
+
+            if (normalizedSheba is null || normalizedSheba.Length != 24)
+            {
+                ModernMessageBox.ShowError("شماره شبا وارد شده معتبر نیست.");
+                return;
             }
-            base.Dispose(disposing);
-        }
 
-        private void BuildUI()
-        {
-            UIHelper.SetupForm(this, $"حساب‌های بانکی: {_partyName}", new Size(900, 650));
+            string fullSheba = "IR" + normalizedSheba;
 
-            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
-
-            var pnlTop = UIHelper.CreateWarmPanel();
-            pnlTop.Padding = new Padding(15);
-
-            var layoutTop = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 2 };
-            layoutTop.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-            layoutTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            layoutTop.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
-            layoutTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            layoutTop.RowStyles.Add(new RowStyle(SizeType.Absolute, 45F));
-            layoutTop.RowStyles.Add(new RowStyle(SizeType.Absolute, 50F));
-
-            var lblSheba = new Label { Text = "شماره شبا (IR...):", AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(5, 10, 5, 5) };
-            UIHelper.StyleLabel(lblSheba);
-
-            txtSheba = new TextBox { Dock = DockStyle.Fill, Margin = new Padding(5, 8, 5, 5), Font = UIHelper.PersianFont(12f), BackColor = UIHelper.WarmInputBackground, BorderStyle = BorderStyle.FixedSingle };
-            txtSheba.TextChanged += TxtSheba_TextChanged;
-            layoutTop.Controls.Add(lblSheba, 0, 0);
-            layoutTop.Controls.Add(txtSheba, 1, 0);
-
-            var lblBankName = new Label { Text = "نام بانک:", AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(5, 10, 5, 5) };
-            UIHelper.StyleLabel(lblBankName);
-
-            txtBankName = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, Margin = new Padding(5, 8, 5, 5), Font = UIHelper.PersianFont(12f), BackColor = UIHelper.WarmInputBackground, BorderStyle = BorderStyle.FixedSingle };
-            layoutTop.Controls.Add(lblBankName, 2, 0);
-            layoutTop.Controls.Add(txtBankName, 3, 0);
-
-            btnAdd = UIHelper.CreateButton("➕ ثبت و افزودن شماره شبا", UIHelper.WarmPrimary, 250, 45);
-            btnAdd.Dock = DockStyle.Fill;
-            btnAdd.Click += async (s, e) => await BtnAdd_Click(s, e);
-            layoutTop.Controls.Add(btnAdd, 0, 1);
-            layoutTop.SetColumnSpan(btnAdd, 4);
-
-            pnlTop.Controls.Add(layoutTop);
-            mainLayout.Controls.Add(pnlTop, 0, 0);
-
-            dgvBanks = new DataGridView { Dock = DockStyle.Fill, AutoGenerateColumns = false, Margin = new Padding(0, 10, 0, 10) };
-            dgvBanks.ApplyModernStyle();
-            dgvBanks.AutoGenerateColumns = false;
-
-            dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Id", Visible = false });
-            dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ShebaNumber", HeaderText = "شماره شبا", FillWeight = 40 });
-            dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "BankName", HeaderText = "نام بانک", FillWeight = 30 });
-            dgvBanks.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "IsMainAccount", HeaderText = "وضعیت", FillWeight = 15 });
-
-            dgvBanks.CellFormatting += DgvBanks_CellFormatting;
-            mainLayout.Controls.Add(dgvBanks, 0, 1);
-
-            var pnlBottom = new FlowLayoutPanel
+            if (!ShebaHelper.IsValid(fullSheba))
             {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.RightToLeft,
-                WrapContents = false,
-                Padding = new Padding(10),
-                BackColor = UIHelper.WarmPanelBackground
-            };
-
-            btnDelete = UIHelper.CreateButton("🗑️ حذف شماره شبا", UIHelper.WarmDanger, 180, 40);
-            btnDelete.Click += async (s, e) => await BtnDelete_Click(s, e);
-
-            btnSetMain = UIHelper.CreateButton("⭐ تنظیم به عنوان حساب اصلی", UIHelper.WarmSecondary, 220, 40);
-            btnSetMain.Click += async (s, e) => await BtnSetMain_Click(s, e);
-
-            pnlBottom.Controls.Add(btnDelete);
-            pnlBottom.Controls.Add(btnSetMain);
-            mainLayout.Controls.Add(pnlBottom, 0, 2);
-
-            this.Controls.Add(mainLayout);
-        }
-
-        private async Task LoadDataSafeAsync()
-        {
-            if (IsDisposed) return;
-            if (!await _loadLock.WaitAsync(0)) return;
-
-            try
-            {
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var banksTask = Task.Run(() => DbHelper.ExecuteQuery(_connectionString, "SELECT BankCode, BankName FROM Banks;"));
-                    var shebasTask = Task.Run(() => DbHelper.ExecuteQuery(_connectionString,
-                        "SELECT Id, ShebaNumber, BankName, IsMainAccount FROM PartyBankAccounts WHERE PartyId = @pid ORDER BY IsMainAccount DESC, Id DESC;",
-                        new SqlParameter("@pid", _partyId)));
-
-                    await Task.WhenAll(banksTask, shebasTask);
-
-                    if (IsDisposed) return;
-
-                    _bankCodes.Clear();
-                    foreach (DataRow row in banksTask.Result.Rows)
-                    {
-                        string code = row[0]?.ToString() ?? "";
-                        string name = row[1]?.ToString() ?? "";
-                        if (!string.IsNullOrEmpty(code) && !_bankCodes.ContainsKey(code))
-                            _bankCodes.Add(code, name);
-                    }
-
-                    dgvBanks.DataSource = shebasTask.Result;
-                }, "در حال بارگذاری اطلاعات...");
-
-                if (!success && !IsDisposed) ModernMessageBox.ShowError("خطا در بارگذاری اطلاعات.");
+                ModernMessageBox.ShowError("شماره شبا وارد شده از نظر چک‌سام معتبر نیست.");
+                return;
             }
-            catch (Exception ex)
+
+            string bankName = BankHelper.GetBankNameFromSheba(normalizedSheba);
+            if (string.IsNullOrEmpty(bankName) || bankName.StartsWith("بانک ناشناخته"))
             {
-                LogHelper.LogException(ex, "PartyBankAccountsForm.LoadDataSafeAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
+                ModernMessageBox.ShowError("کد بانک در شماره شبا نامعتبر است یا در سیستم تعریف نشده است.");
+                return;
             }
-            finally
+
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                try { _loadLock.Release(); } catch { }
+                await _repo.AddBankAccountAsync(_partyId, fullSheba, normalizedSheba.Substring(0, 3), bankName);
+            }, "در حال ثبت شماره شبا...");
+
+            if (success && !IsDisposed)
+            {
+                ToastHelper.Show("شماره شبا با موفقیت ثبت شد.", isSuccess: true);
+                txtSheba.Text = string.Empty;
+                txtBankName.Text = string.Empty;
+                await LoadDataSafeAsync();
             }
         }
-
-        private void TxtSheba_TextChanged(object? sender, EventArgs e)
+        catch (Exception ex)
         {
-            string sheba = StringHelper.ConvertToEnglishDigits(txtSheba.Text).Trim().Replace(" ", "").ToUpper();
-
-            string? bankCode = null;
-            if (sheba.StartsWith("IR") && sheba.Length >= 7)
-                bankCode = sheba.Substring(4, 3);
-            else if (sheba.Length >= 5)
-                bankCode = sheba.Substring(2, 3);
-
-            if (!string.IsNullOrEmpty(bankCode) && _bankCodes.ContainsKey(bankCode))
-                txtBankName.Text = _bankCodes[bankCode];
-            else
-                txtBankName.Text = "";
+            LogHelper.LogException(ex, "PartyBankAccountsForm.BtnAdd_Click");
+            if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
         }
-
-        private void DgvBanks_CellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+        finally
         {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-            if (dgvBanks.Columns[e.ColumnIndex].Name != "IsMainAccount") return;
+            try { _actionLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyBankAccountsForm"); }
+        }
+    }
 
-            var rowView = dgvBanks.Rows[e.RowIndex].DataBoundItem as DataRowView;
-            if (rowView == null) return;
+    private async Task BtnSetMain_Click(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        if (!await _actionLock.WaitAsync(0)) return;
 
+        try
+        {
+            if (dgvBanks.CurrentRow?.DataBoundItem is not DataRowView rowView)
+            {
+                ModernMessageBox.ShowWarning("لطفاً یک شماره شبا را از جدول انتخاب کنید.");
+                return;
+            }
+
+            int id = Convert.ToInt32(rowView["Id"]);
             int isMain = Convert.ToInt32(rowView["IsMainAccount"]);
-            if (isMain == 1)
+
+            if (isMain == 1) return;
+
+            if (!ModernMessageBox.AskConfirm("آیا این شماره شبا به عنوان حساب اصلی تنظیم شود؟", "تغییر حساب اصلی")) return;
+
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                e.Value = "⭐ حساب اصلی";
-                e.CellStyle.ForeColor = UIHelper.WarmSecondary;
-                e.CellStyle.Font = UIHelper.PersianFont(12f, FontStyle.Bold);
-            }
-            else
+                await _repo.SetMainBankAccountAsync(_partyId, id);
+            }, "در حال تنظیم حساب اصلی...");
+
+            if (success && !IsDisposed)
             {
-                e.Value = "-";
-                e.CellStyle.ForeColor = UIHelper.WarmText;
-            }
-            e.FormattingApplied = true;
-        }
-
-        private async Task BtnAdd_Click(object? sender, EventArgs e)
-        {
-            if (IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                string rawSheba = txtSheba.Text.Trim();
-                string normalizedSheba = BankHelper.NormalizeSheba(rawSheba);
-
-                if (normalizedSheba == null || normalizedSheba.Length != 24)
-                {
-                    ModernMessageBox.ShowError("شماره شبا وارد شده معتبر نیست.");
-                    return;
-                }
-
-                string fullSheba = "IR" + normalizedSheba;
-
-                if (!ShebaHelper.IsValid(fullSheba))
-                {
-                    ModernMessageBox.ShowError("شماره شبا وارد شده از نظر چک‌سام معتبر نیست.");
-                    return;
-                }
-
-                string bankName = BankHelper.GetBankNameFromSheba(normalizedSheba);
-                if (string.IsNullOrEmpty(bankName) || bankName.StartsWith("بانک ناشناخته"))
-                {
-                    ModernMessageBox.ShowError("کد بانک در شماره شبا نامعتبر است یا در سیستم تعریف نشده است.");
-                    return;
-                }
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    string checkSql = "SELECT COUNT(1) FROM PartyBankAccounts WHERE ShebaNumber = @sheba;";
-                    var exists = Convert.ToInt32(await Task.Run(() => DbHelper.ExecuteScalar(_connectionString, checkSql, new SqlParameter("@sheba", fullSheba)))) > 0;
-
-                    if (exists)
-                        throw new InvalidOperationException("این شماره شبا قبلاً در سیستم ثبت شده است.");
-
-                    string countSql = "SELECT COUNT(1) FROM PartyBankAccounts WHERE PartyId = @pid;";
-                    var count = Convert.ToInt32(await Task.Run(() => DbHelper.ExecuteScalar(_connectionString, countSql, new SqlParameter("@pid", _partyId))));
-                    bool isFirstAccount = count == 0;
-                    int isMain = isFirstAccount ? 1 : 0;
-
-                    string insertSql = @"
-                        INSERT INTO PartyBankAccounts (PartyId, ShebaNumber, BankCode, BankName, IsMainAccount)
-                        VALUES (@pid, @sheba, @bcode, @bname, @isMain);";
-
-                    await Task.Run(() => DbHelper.ExecuteNonQuery(_connectionString, insertSql,
-                        new SqlParameter("@pid", _partyId),
-                        new SqlParameter("@sheba", fullSheba),
-                        new SqlParameter("@bcode", normalizedSheba.Substring(0, 3)),
-                        new SqlParameter("@bname", bankName),
-                        new SqlParameter("@isMain", isMain)));
-                }, "در حال ثبت شماره شبا...");
-
-                if (success && !IsDisposed)
-                {
-                    ToastHelper.Show("شماره شبا با موفقیت ثبت شد.", isSuccess: true);
-                    txtSheba.Clear();
-                    txtBankName.Clear();
-                    await LoadDataSafeAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PartyBankAccountsForm.BtnAdd_Click");
-                if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
+                ToastHelper.Show("حساب اصلی با موفقیت تغییر یافت.", isSuccess: true);
+                await LoadDataSafeAsync();
             }
         }
-
-        private async Task BtnSetMain_Click(object? sender, EventArgs e)
+        catch (Exception ex)
         {
-            if (IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return;
+            LogHelper.LogException(ex, "PartyBankAccountsForm.BtnSetMain_Click");
+            if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
+        }
+        finally
+        {
+            try { _actionLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyBankAccountsForm"); }
+        }
+    }
 
-            try
+    private async Task BtnDelete_Click(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        if (!await _actionLock.WaitAsync(0)) return;
+
+        try
+        {
+            if (dgvBanks.CurrentRow?.DataBoundItem is not DataRowView rowView)
             {
-                if (dgvBanks.CurrentRow?.DataBoundItem is not DataRowView rowView)
-                {
-                    ModernMessageBox.ShowWarning("لطفاً یک شماره شبا را از جدول انتخاب کنید.");
-                    return;
-                }
-
-                int id = Convert.ToInt32(rowView["Id"]);
-                int isMain = Convert.ToInt32(rowView["IsMainAccount"]);
-
-                if (isMain == 1) return;
-
-                if (!ModernMessageBox.AskConfirm("آیا این شماره شبا به عنوان حساب اصلی تنظیم شود؟", "تغییر حساب اصلی")) return;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    await Task.Run(() =>
-                    {
-                        using var conn = new SqlConnection(_connectionString);
-                        conn.Open();
-                        using var transaction = conn.BeginTransaction();
-
-                        try
-                        {
-                            using (var cmd1 = new SqlCommand("UPDATE PartyBankAccounts SET IsMainAccount = 0 WHERE PartyId = @pid;", conn, transaction))
-                            {
-                                cmd1.Parameters.AddWithValue("@pid", _partyId);
-                                cmd1.ExecuteNonQuery();
-                            }
-
-                            using (var cmd2 = new SqlCommand("UPDATE PartyBankAccounts SET IsMainAccount = 1 WHERE Id = @id;", conn, transaction))
-                            {
-                                cmd2.Parameters.AddWithValue("@id", id);
-                                cmd2.ExecuteNonQuery();
-                            }
-
-                            transaction.Commit();
-                        }
-                        catch
-                        {
-                            transaction.Rollback();
-                            throw;
-                        }
-                    });
-                }, "در حال تنظیم حساب اصلی...");
-
-                if (success && !IsDisposed)
-                {
-                    ToastHelper.Show("حساب اصلی با موفقیت تغییر یافت.", isSuccess: true);
-                    await LoadDataSafeAsync();
-                }
+                ModernMessageBox.ShowWarning("لطفاً یک شماره شبا را از جدول انتخاب کنید.");
+                return;
             }
-            catch (Exception ex)
+
+            int id = Convert.ToInt32(rowView["Id"]);
+            string sheba = rowView["ShebaNumber"].ToString() ?? "";
+            bool isMain = Convert.ToInt32(rowView["IsMainAccount"]) == 1;
+
+            if (isMain)
             {
-                LogHelper.LogException(ex, "PartyBankAccountsForm.BtnSetMain_Click");
-                if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
+                ModernMessageBox.ShowWarning("شما نمی‌توانید حساب اصلی را حذف کنید. ابتدا یک حساب دیگر را به عنوان اصلی تنظیم کنید.");
+                return;
             }
-            finally
+
+            if (!ModernMessageBox.AskConfirm($"آیا از حذف شماره شبا «{sheba}» مطمئن هستید؟", "حذف شماره شبا")) return;
+
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                try { _actionLock.Release(); } catch { }
+                await _repo.DeleteBankAccountAsync(id);
+            }, "در حال حذف...");
+
+            if (success && !IsDisposed)
+            {
+                ToastHelper.Show("شماره شبا با موفقیت حذف شد.", isSuccess: true);
+                await LoadDataSafeAsync();
             }
         }
-
-        private async Task BtnDelete_Click(object? sender, EventArgs e)
+        catch (Exception ex)
         {
-            if (IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                if (dgvBanks.CurrentRow?.DataBoundItem is not DataRowView rowView)
-                {
-                    ModernMessageBox.ShowWarning("لطفاً یک شماره شبا را از جدول انتخاب کنید.");
-                    return;
-                }
-
-                int id = Convert.ToInt32(rowView["Id"]);
-                string sheba = rowView["ShebaNumber"].ToString() ?? "";
-                bool isMain = Convert.ToInt32(rowView["IsMainAccount"]) == 1;
-
-                if (isMain)
-                {
-                    ModernMessageBox.ShowWarning("شما نمی‌توانید حساب اصلی را حذف کنید. ابتدا یک حساب دیگر را به عنوان اصلی تنظیم کنید.");
-                    return;
-                }
-
-                if (!ModernMessageBox.AskConfirm($"آیا از حذف شماره شبا «{sheba}» مطمئن هستید؟", "حذف شماره شبا")) return;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    string deleteSql = "DELETE FROM PartyBankAccounts WHERE Id = @id;";
-                    await Task.Run(() => DbHelper.ExecuteNonQuery(_connectionString, deleteSql, new SqlParameter("@id", id)));
-                }, "در حال حذف...");
-
-                if (success && !IsDisposed)
-                {
-                    ToastHelper.Show("شماره شبا با موفقیت حذف شد.", isSuccess: true);
-                    await LoadDataSafeAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PartyBankAccountsForm.BtnDelete_Click");
-                if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
+            LogHelper.LogException(ex, "PartyBankAccountsForm.BtnDelete_Click");
+            if (!IsDisposed) ModernMessageBox.ShowError(ex.Message);
+        }
+        finally
+        {
+            try { _actionLock.Release(); } catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "PartyBankAccountsForm"); }
         }
     }
 }

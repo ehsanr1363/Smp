@@ -1,1345 +1,1280 @@
-﻿using SMP.Data;
-using SMP.Helpers;
-using SMP.Models;
-using SMP.Services;
+﻿using Smp.Data;
+using Smp.Helpers;
+using Smp.Models;
+using Smp.Services;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Data;
 using System.Drawing;
-using System.Globalization;
+using System.Drawing.Drawing2D;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class PayrollProcessForm : Form
 {
-    public class PayrollProcessForm : Form
+    private readonly string _connectionString;
+    private readonly PayrollCalculatorService _calculator;
+    private readonly PayrollRepository _payrollRepo;
+
+    private ComboBox cmbYear = null!, cmbMonth = null!;
+    private Button btnCalculate = null!, btnCalcMissing = null!, btnRecalcSelected = null!, btnDelete = null!, btnSave = null!;
+    private PayrollInfoBar _infoBar = null!;
+    private TableLayoutPanel _mainLayout = null!;
+    private ModernStatCard _stSaved = null!, _stUnsaved = null!, _stNet = null!;
+    private PayrollSegmentTabs _tabs = null!;
+
+    private DataGridView dgvContractual = null!;
+    private DataGridView dgvDaily = null!;
+    private DataGridView dgvHourly = null!;
+
+    // ✅ همه‌ی ردیف‌های دوره‌ی جاری (هم ذخیره‌شده از دیتابیس، هم محاسبه‌ی جدید)؛ کلید = EmployeeId
+    private readonly Dictionary<int, PayrollResult> _rows = new();
+
+    // ✅ کارمندانی که الآن در دیتابیس فیش دارند + اقساطی که در همان فیش کسر شده
+    // (برای محاسبه مجدد، همین اقساط استفاده می‌شود تا با برگشت/کسر دوباره‌ی ریپازیتوری هم‌خوان بماند)
+    private readonly Dictionary<int, (decimal Loan, decimal Advance, decimal Supp, decimal Car)> _savedDeductions = new();
+
+    // دوره‌ای که الآن روی صفحه نمایش داده می‌شود
+    private int _periodYear;
+    private int _periodMonth;
+
+    private bool _formReady;
+    private bool _suppressPeriodChange;
+    private bool _isBusy;
+
+    public PayrollProcessForm(string connectionString)
     {
-        private readonly string _connectionString;
-        private readonly PayrollCalculatorService _calculatorService;
-        private readonly PayrollRepository _payrollRepository;
-        private readonly LoanRepository _loanRepository;
-        private readonly SupplementaryInsuranceRepository _suppInsuranceRepository;
-        private readonly CarInsuranceRepository _carInsuranceRepository;
-        private readonly BankAccountRepository _bankRepo;
+        _connectionString = connectionString;
+        _calculator = new PayrollCalculatorService();
+        _payrollRepo = new PayrollRepository(connectionString);
 
-        private ComboBox cmbYear = null!, cmbMonth = null!;
-        private Button btnCalculateAll = null!, btnSave = null!;
-        private TabControl tabControl = null!;
+        BuildUI();
+        this.ApplyStandardHeader("پردازش حقوق ماهانه (تفکیک‌شده)", new Size(1300, 820));
+        ShowInTaskbar = false;
 
-        private DataGridView dgvContractual = null!, dgvDaily = null!, dgvHourly = null!;
-        private CheckBox chkAllContractual = null!, chkAllDaily = null!, chkAllHourly = null!;
-        private Button btnRecalcContractual = null!, btnRecalcDaily = null!, btnRecalcHourly = null!;
-        private Label lblSummaryContractual = null!, lblSummaryDaily = null!, lblSummaryHourly = null!;
+        ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
 
-        private DataTable? _dtContractual;
-        private DataTable? _dtDaily;
-        private DataTable? _dtHourly;
-
-        private readonly Dictionary<string, PayrollResult> _resultsByCode = new(StringComparer.Ordinal);
-
-        private List<Employee> _currentEmployees = new();
-        private int _currentYear;
-        private int _currentMonth;
-        private bool _isLoadedFromDb = false;
-
-        private readonly SemaphoreSlim _loadLock = new(1, 1);
-        private readonly SemaphoreSlim _actionLock = new(1, 1);
-
-        public PayrollProcessForm(string connectionString)
+        // ✅ با باز شدن فرم، فیش‌های ذخیره‌شده‌ی ماه انتخاب‌شده خودکار نمایش داده می‌شود (بدون زدن «محاسبه»)
+        this.Shown += async (s, e) =>
         {
-            _connectionString = connectionString;
-            _calculatorService = new PayrollCalculatorService();
-            _payrollRepository = new PayrollRepository(connectionString);
-            _loanRepository = new LoanRepository(connectionString);
-            _suppInsuranceRepository = new SupplementaryInsuranceRepository(connectionString);
-            _carInsuranceRepository = new CarInsuranceRepository(connectionString);
-            _bankRepo = new BankAccountRepository(connectionString);
+            await LoadSavedAsync();
+            _formReady = true;
+        };
 
-            BuildUI();
-            this.ApplyStandardHeader("پردازش حقوق ماهانه (تفکیک‌شده)", new Size(1600, 800));
-            ShowInTaskbar = false;
+        cmbYear.SelectedIndexChanged += async (s, e) => await OnPeriodChangedAsync();
+        cmbMonth.SelectedIndexChanged += async (s, e) => await OnPeriodChangedAsync();
+    }
 
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
-            LoadDefaults();
+    // ═══════════════════════════════════════════════════════════════
+    // UI
+    // ═══════════════════════════════════════════════════════════════
+    private void BuildUI()
+    {
+        var pc = new System.Globalization.PersianCalendar();
 
-            cmbYear.SelectedIndexChanged += async (s, e) => await TryLoadExistingPayrollsAsync();
-            cmbMonth.SelectedIndexChanged += async (s, e) => await TryLoadExistingPayrollsAsync();
+        // ─── انتخاب دوره (سال / ماه) ───
+        cmbYear = ModernUI.Combo();
+        for (int i = 1400; i <= 1410; i++) cmbYear.Items.Add(i);
+        cmbYear.SelectedItem = pc.GetYear(DateTime.Now);
+        cmbYear.Width = 96;
+        cmbYear.Margin = new Padding(2, 0, 14, 0);
 
-            Shown += async (s, e) => await TryLoadExistingPayrollsAsync();
-        }
+        cmbMonth = ModernUI.Combo();
+        for (int i = 1; i <= 12; i++) cmbMonth.Items.Add(i);
+        cmbMonth.SelectedItem = pc.GetMonth(DateTime.Now);
+        cmbMonth.Width = 80;
+        cmbMonth.Margin = new Padding(2, 0, 0, 0);
 
-        protected override void Dispose(bool disposing)
+        // لیبل هم‌ارتفاع با کمبو (۳۶) و وسط‌چین تا دقیقاً هم‌تراز شوند
+        Label PeriodLabel(string t)
         {
-            if (disposing)
+            var font = ModernTheme.GetFont(10f, FontStyle.Bold);
+            int w = TextRenderer.MeasureText(t, font).Width + 8;
+            return new Label
             {
-                try { _loadLock?.Dispose(); } catch { }
-                try { _actionLock?.Dispose(); } catch { }
-            }
-            base.Dispose(disposing);
-        }
-
-        private void LoadDefaults()
-        {
-            var pc = new PersianCalendar();
-            int currentYear = pc.GetYear(DateTime.Now);
-            int currentMonth = pc.GetMonth(DateTime.Now);
-
-            if (cmbYear.Items.Contains(currentYear)) cmbYear.SelectedItem = currentYear;
-            else if (cmbYear.Items.Count > 0) cmbYear.SelectedIndex = 0;
-
-            if (cmbMonth.Items.Contains(currentMonth)) cmbMonth.SelectedItem = currentMonth;
-            else if (cmbMonth.Items.Count > 0) cmbMonth.SelectedIndex = 0;
-        }
-
-        private void BuildUI()
-        {
-            var topPanel = new Panel { Dock = DockStyle.Top, Height = 60, Padding = new Padding(10) };
-            var topFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
-
-            cmbYear = new ComboBox { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 8, 15, 5) };
-            for (int i = 1400; i <= 1410; i++) cmbYear.Items.Add(i);
-
-            cmbMonth = new ComboBox { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 8, 15, 5) };
-            for (int i = 1; i <= 12; i++) cmbMonth.Items.Add(i);
-
-            btnCalculateAll = UIHelper.CreateButton("محاسبه همه پرسنل", UIHelper.ActionGreen, 200, 35);
-            btnCalculateAll.Margin = new Padding(5, 3, 15, 5);
-            btnCalculateAll.Click += BtnCalculateAll_Click;
-
-            btnSave = UIHelper.CreateButton("💾 ذخیره همه (سه تب)", UIHelper.SectionBlue, 200, 35);
-            btnSave.Margin = new Padding(5, 3, 5, 5);
-            btnSave.Enabled = false;
-            btnSave.Click += BtnSave_Click;
-
-            var lblHint = new Label
-            {
-                Text = "💡 سوابق ذخیره‌شده‌ی هر ماه به‌طور خودکار بارگذاری می‌شود. برای محاسبه‌ی مجدد، تیک بزنید + «محاسبه مجدد».",
-                AutoSize = true,
-                Font = UIHelper.PersianFont(9f),
-                ForeColor = UIHelper.WarmDanger,
-                Margin = new Padding(20, 14, 5, 5)
-            };
-
-            topFlow.Controls.Add(new Label { Text = "سال:", AutoSize = true, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 13, 5, 5) });
-            topFlow.Controls.Add(cmbYear);
-            topFlow.Controls.Add(new Label { Text = "ماه:", AutoSize = true, Font = UIHelper.PersianFont(11f), Margin = new Padding(5, 13, 5, 5) });
-            topFlow.Controls.Add(cmbMonth);
-            topFlow.Controls.Add(btnCalculateAll);
-            topFlow.Controls.Add(btnSave);
-            topFlow.Controls.Add(lblHint);
-
-            topPanel.Controls.Add(topFlow);
-
-            tabControl = new TabControl
-            {
-                Dock = DockStyle.Fill,
-                Font = UIHelper.PersianFont(12f, FontStyle.Bold),
-                SizeMode = TabSizeMode.Fixed,
-                ItemSize = new Size(200, 40)
-            };
-            ModernLayoutHelper.StyleModernTabControl(tabControl);
-
-            var tab1 = CreatePayrollTab("قراردادی / ماهانه (پرسنل)");
-            dgvContractual = tab1.grid;
-            chkAllContractual = tab1.chkAll;
-            btnRecalcContractual = tab1.btnRecalc;
-            lblSummaryContractual = tab1.lblSummary;
-            tabControl.TabPages.Add(tab1.page);
-            WireTabEvents(dgvContractual, TabKey.Contractual);
-            chkAllContractual.CheckedChanged += (s, e) => ToggleSelectAll(TabKey.Contractual);
-            btnRecalcContractual.Click += async (s, e) => await RecalculateSelectedAsync(TabKey.Contractual);
-
-            var tab2 = CreatePayrollTab("روزمزد (کارگران)");
-            dgvDaily = tab2.grid;
-            chkAllDaily = tab2.chkAll;
-            btnRecalcDaily = tab2.btnRecalc;
-            lblSummaryDaily = tab2.lblSummary;
-            tabControl.TabPages.Add(tab2.page);
-            WireTabEvents(dgvDaily, TabKey.Daily);
-            chkAllDaily.CheckedChanged += (s, e) => ToggleSelectAll(TabKey.Daily);
-            btnRecalcDaily.Click += async (s, e) => await RecalculateSelectedAsync(TabKey.Daily);
-
-            var tab3 = CreatePayrollTab("ساعتی (کارگران)");
-            dgvHourly = tab3.grid;
-            chkAllHourly = tab3.chkAll;
-            btnRecalcHourly = tab3.btnRecalc;
-            lblSummaryHourly = tab3.lblSummary;
-            tabControl.TabPages.Add(tab3.page);
-            WireTabEvents(dgvHourly, TabKey.Hourly);
-            chkAllHourly.CheckedChanged += (s, e) => ToggleSelectAll(TabKey.Hourly);
-            btnRecalcHourly.Click += async (s, e) => await RecalculateSelectedAsync(TabKey.Hourly);
-
-            this.Controls.Add(tabControl);
-            this.Controls.Add(topPanel);
-        }
-
-        private enum TabKey { Contractual, Daily, Hourly }
-
-        private (TabPage page, DataGridView grid, CheckBox chkAll, Button btnRecalc, Label lblSummary) CreatePayrollTab(string title)
-        {
-            var page = new TabPage(title) { BackColor = UIHelper.WarmBackground, Padding = new Padding(5) };
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-            var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Padding = new Padding(5) };
-
-            var lblSummary = new Label
-            {
-                AutoSize = true,
-                Font = UIHelper.PersianFont(10.5f, FontStyle.Bold),
-                ForeColor = UIHelper.WarmText,
-                Margin = new Padding(5, 12, 20, 5),
-                Text = "—"
-            };
-
-            var btnRecalc = UIHelper.CreateButton("🔄 محاسبه مجدد انتخاب‌شده‌ها", UIHelper.SectionPurple, 260, 32);
-            btnRecalc.Enabled = false;
-            btnRecalc.Margin = new Padding(5, 4, 15, 3);
-
-            var chkAll = new CheckBox
-            {
-                Text = "انتخاب همه",
-                AutoSize = true,
-                Font = UIHelper.PersianFont(10.5f, FontStyle.Bold),
-                ForeColor = UIHelper.WarmText,
-                Enabled = false,
-                Margin = new Padding(5, 12, 5, 5)
-            };
-
-            toolbar.Controls.Add(lblSummary);
-            toolbar.Controls.Add(btnRecalc);
-            toolbar.Controls.Add(chkAll);
-
-            var grid = new DataGridView { Dock = DockStyle.Fill, EditMode = DataGridViewEditMode.EditOnEnter };
-            grid.ApplyModernStyle();
-            grid.ReadOnly = false;
-            grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells;
-
-            layout.Controls.Add(toolbar, 0, 0);
-            layout.Controls.Add(grid, 0, 1);
-            page.Controls.Add(layout);
-
-            return (page, grid, chkAll, btnRecalc, lblSummary);
-        }
-
-        private void WireTabEvents(DataGridView dgv, TabKey key)
-        {
-            dgv.CellFormatting += (s, e) =>
-            {
-                if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-                if (e.Value is decimal dec)
-                {
-                    e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true);
-                    e.FormattingApplied = true;
-                }
-            };
-
-            dgv.CurrentCellDirtyStateChanged += (s, e) =>
-            {
-                if (dgv.IsCurrentCellDirty && dgv.CurrentCell is DataGridViewCheckBoxCell)
-                    dgv.CommitEdit(DataGridViewDataErrorContexts.Commit);
-            };
-
-            dgv.CellEndEdit += (s, e) => HandleOtherDeductionsEdit(dgv, key, e);
-
-            dgv.CellDoubleClick += (s, e) =>
-            {
-                if (e.RowIndex < 0) return;
-                if (dgv.Rows[e.RowIndex].DataBoundItem is not DataRowView drv) return;
-                string code = drv["PersonnelCode"]?.ToString() ?? "";
-                if (_resultsByCode.TryGetValue(code, out var res))
-                {
-                    using var form = new PayslipForm(res);
-                    form.ShowDialog(this);
-                }
+                Text = t, AutoSize = false, Size = new Size(w, ModernTheme.InputHeight),
+                TextAlign = ContentAlignment.MiddleCenter, Font = font,
+                ForeColor = ModernTheme.TextMuted, Margin = new Padding(0, 0, 2, 0), BackColor = Color.Transparent
             };
         }
 
-        private async Task TryLoadExistingPayrollsAsync()
+        // ─── دکمه‌ها (آیکن‌های ترسیمی به‌جای ایموجی؛ ظاهر یکدست روی همه‌ی سیستم‌ها) ───
+        btnCalculate = ToolButton("محاسبه همه", ModernTheme.Primary, ModernButtonStyle.Filled, PayrollIcon.Calc);
+        btnCalculate.Click += async (s, e) => await CalculateAsync(null);
+
+        btnCalcMissing = ToolButton("محاسبه افراد بدون حقوق", ModernTheme.Purple, ModernButtonStyle.Soft, PayrollIcon.Plus);
+        btnCalcMissing.Click += async (s, e) => await CalculateAsync(null, onlyMissing: true);
+
+        btnRecalcSelected = ToolButton("محاسبه مجدد انتخاب‌شده‌ها", ModernTheme.Teal, ModernButtonStyle.Soft, PayrollIcon.Refresh);
+        btnRecalcSelected.Click += async (s, e) => await RecalculateSelectedAsync();
+
+        btnDelete = ToolButton("حذف انتخاب‌شده‌ها", ModernTheme.Danger, ModernButtonStyle.Soft, PayrollIcon.Trash);
+        btnDelete.Click += async (s, e) => await DeleteSelectedAsync();
+
+        btnSave = ToolButton("ذخیره", ModernTheme.Success, ModernButtonStyle.Filled, PayrollIcon.Save);
+        btnSave.Click += async (s, e) => await SaveSafeAsync();
+
+        FlowLayoutPanel Group(params Control[] items)
         {
-            if (cmbYear.SelectedItem == null || cmbMonth.SelectedItem == null || IsDisposed) return;
-
-            if (!_actionLock.Wait(0)) return;
-
-            bool loadLockAcquired = false;
-            try
+            var f = new FlowLayoutPanel
             {
-                try
-                {
-                    loadLockAcquired = await _loadLock.WaitAsync(0);
-                    if (!loadLockAcquired) return;
-                }
-                catch (ObjectDisposedException) { return; }
-
-                int year = Convert.ToInt32(cmbYear.SelectedItem);
-                int month = Convert.ToInt32(cmbMonth.SelectedItem);
-
-                _dtContractual = null;
-                _dtDaily = null;
-                _dtHourly = null;
-                _resultsByCode.Clear();
-                _isLoadedFromDb = false;
-
-                dgvContractual.DataSource = null;
-                dgvDaily.DataSource = null;
-                dgvHourly.DataSource = null;
-
-                btnSave.Enabled = false;
-                btnRecalcContractual.Enabled = false;
-                btnRecalcDaily.Enabled = false;
-                btnRecalcHourly.Enabled = false;
-                chkAllContractual.Enabled = false;
-                chkAllDaily.Enabled = false;
-                chkAllHourly.Enabled = false;
-                chkAllContractual.Checked = false;
-                chkAllDaily.Checked = false;
-                chkAllHourly.Checked = false;
-
-                List<Employee>? employeesList = null;
-                Dictionary<int, PayrollResult>? computedResults = null;
-                bool hasSaved = false;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    hasSaved = await _payrollRepository.HasPayrollsForMonthAsync(year, month);
-                    if (!hasSaved) return;
-
-                    DataTable? savedDt = await _payrollRepository.GetSavedPayrollsAsync(year, month);
-                    if (savedDt == null || savedDt.Rows.Count == 0)
-                    {
-                        hasSaved = false;
-                        return;
-                    }
-
-                    var empRepo = new EmployeeRepository(_connectionString);
-                    employeesList = await empRepo.GetEmployeesWithDetailsAsync("", false);
-                    var employeesById = employeesList.ToDictionary(e => e.Id);
-
-                    var settingsRepo = new SalarySettingsRepository(_connectionString);
-                    var settings = await settingsRepo.GetByYearAsync(year);
-
-                    var attRepo = new AttendanceRepository(_connectionString);
-                    var attendances = await attRepo.GetAttendanceForMonthAsync(year, month);
-
-                    var activeLoans = await _loanRepository.GetActiveLoansAsync();
-                    var activeSuppIns = await _suppInsuranceRepository.GetActiveInsurancesAsync();
-                    var activeCarIns = await _carInsuranceRepository.GetActiveCarInsurancesAsync();
-
-                    var taxBrackets = _calculatorService.GetTaxBracketsSafe(year);
-
-                    var loansByEmployee = activeLoans.GroupBy(l => l.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-                    var suppInsByEmployee = activeSuppIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-                    var carInsByEmployee = activeCarIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-
-                    computedResults = await Task.Run(() =>
-                    {
-                        var dict = new Dictionary<int, PayrollResult>();
-
-                        foreach (DataRow row in savedDt.Rows)
-                        {
-                            int empId = Convert.ToInt32(row["EmployeeId"]);
-                            if (!employeesById.TryGetValue(empId, out var emp)) continue;
-
-                            decimal dbBaseSalary = row["BaseSalary"] == DBNull.Value ? 0m : Convert.ToDecimal(row["BaseSalary"]);
-                            decimal dbOvertimePay = row.Table.Columns.Contains("OvertimePay") && row["OvertimePay"] != DBNull.Value ? Convert.ToDecimal(row["OvertimePay"]) : 0m;
-                            decimal dbTotalEarnings = row["TotalEarnings"] == DBNull.Value ? 0m : Convert.ToDecimal(row["TotalEarnings"]);
-                            decimal dbInsuranceEmp = row["InsuranceEmployee"] == DBNull.Value ? 0m : Convert.ToDecimal(row["InsuranceEmployee"]);
-                            decimal dbInsuranceEmpr = row["InsuranceEmployer"] == DBNull.Value ? 0m : Convert.ToDecimal(row["InsuranceEmployer"]);
-                            decimal dbIncomeTax = row["IncomeTax"] == DBNull.Value ? 0m : Convert.ToDecimal(row["IncomeTax"]);
-                            decimal dbLoanDed = row["LoanDeduction"] == DBNull.Value ? 0m : Convert.ToDecimal(row["LoanDeduction"]);
-                            decimal dbSuppInsDed = row["SupplementaryInsuranceDeduction"] == DBNull.Value ? 0m : Convert.ToDecimal(row["SupplementaryInsuranceDeduction"]);
-                            decimal dbCarInsDed = row["CarInsuranceDeduction"] == DBNull.Value ? 0m : Convert.ToDecimal(row["CarInsuranceDeduction"]);
-                            decimal dbOtherDed = row["OtherDeductions"] == DBNull.Value ? 0m : Convert.ToDecimal(row["OtherDeductions"]);
-                            decimal dbAbsenceDed = row["AbsenceDeduction"] == DBNull.Value ? 0m : Convert.ToDecimal(row["AbsenceDeduction"]);
-                            decimal dbTotalDed = row["TotalDeductions"] == DBNull.Value ? 0m : Convert.ToDecimal(row["TotalDeductions"]);
-                            decimal dbNetPay = row["NetPay"] == DBNull.Value ? 0m : Convert.ToDecimal(row["NetPay"]);
-
-                            PayrollResult res;
-
-                            if (settings != null)
-                            {
-                                var att = attendances.Find(a => a.EmployeeId == emp.Id) ?? new Attendance
-                                {
-                                    EmployeeId = emp.Id,
-                                    Year = year,
-                                    Month = month,
-                                    WorkingDays = 30,
-                                    OvertimeHours = 0,
-                                    AbsenceDays = 0
-                                };
-
-                                decimal loanInstallment = 0;
-                                if (loansByEmployee.TryGetValue(emp.Id, out var empLoans) && empLoans.Count > 0)
-                                    loanInstallment = Math.Min(empLoans.Sum(l => l.MonthlyInstallment), empLoans.Sum(l => l.RemainingAmount));
-
-                                decimal suppInsInstallment = 0;
-                                if (suppInsByEmployee.TryGetValue(emp.Id, out var empIns) && empIns.Count > 0)
-                                    suppInsInstallment = Math.Min(empIns.Sum(i => i.MonthlyInstallment), empIns.Sum(i => i.RemainingAmount));
-
-                                decimal carInsInstallment = 0;
-                                if (carInsByEmployee.TryGetValue(emp.Id, out var empCarIns) && empCarIns.Count > 0)
-                                    carInsInstallment = Math.Min(empCarIns.Sum(i => i.MonthlyInstallment), empCarIns.Sum(i => i.RemainingAmount));
-
-                                res = _calculatorService.CalculatePayroll(
-                                    emp, att, settings, loanInstallment, suppInsInstallment, carInsInstallment, dbOtherDed, taxBrackets);
-                            }
-                            else
-                            {
-                                res = new PayrollResult
-                                {
-                                    EmployeeId = emp.Id,
-                                    EmployeeName = emp.FullName,
-                                    PersonnelCode = emp.PersonnelCode ?? "",
-                                    Year = year,
-                                    Month = month,
-                                    PersonnelType = emp.PersonnelType ?? "ماهانه",
-                                    DailyWage = emp.DailyWage,
-                                    HourlyWage = emp.HourlyWage
-                                };
-                            }
-
-                            res.BaseSalary = dbBaseSalary;
-                            res.OvertimePay = dbOvertimePay;
-                            res.TotalEarnings = dbTotalEarnings;
-                            res.InsuranceEmployee = dbInsuranceEmp;
-                            res.InsuranceEmployer = dbInsuranceEmpr;
-                            res.IncomeTax = dbIncomeTax;
-                            res.LoanDeduction = dbLoanDed;
-                            res.SupplementaryInsuranceDeduction = dbSuppInsDed;
-                            res.CarInsuranceDeduction = dbCarInsDed;
-                            res.OtherDeductions = dbOtherDed;
-                            res.AbsenceDeduction = dbAbsenceDed;
-                            res.TotalDeductions = dbTotalDed;
-                            res.NetPay = dbNetPay;
-
-                            dict[empId] = res;
-                        }
-
-                        return dict;
-                    });
-                }, "در حال بارگذاری سوابق محاسبه‌شده...");
-
-                if (!success) return;
-
-                _currentYear = year;
-                _currentMonth = month;
-
-                if (employeesList != null) _currentEmployees = employeesList;
-
-                if (!hasSaved || computedResults == null || computedResults.Count == 0)
-                {
-                    RefreshAllSummaries();
-                    return;
-                }
-
-                _dtContractual = CreatePayrollDataTable();
-                _dtDaily = CreatePayrollDataTable();
-                _dtHourly = CreatePayrollDataTable();
-
-                foreach (var res in computedResults.Values)
-                {
-                    _resultsByCode[res.PersonnelCode ?? ""] = res;
-                    var group = GetTypeGroup(res.PersonnelType);
-                    var target = group switch
-                    {
-                        TabKey.Daily => _dtDaily,
-                        TabKey.Hourly => _dtHourly,
-                        _ => _dtContractual
-                    };
-                    target.Rows.Add(BuildRowValues(res));
-                }
-
-                dgvContractual.DataSource = null;
-                dgvContractual.DataSource = _dtContractual;
-                ConfigurePayrollGrid(dgvContractual, TabKey.Contractual);
-
-                dgvDaily.DataSource = null;
-                dgvDaily.DataSource = _dtDaily;
-                ConfigurePayrollGrid(dgvDaily, TabKey.Daily);
-
-                dgvHourly.DataSource = null;
-                dgvHourly.DataSource = _dtHourly;
-                ConfigurePayrollGrid(dgvHourly, TabKey.Hourly);
-
-                btnSave.Enabled = true;
-                btnRecalcContractual.Enabled = _dtContractual.Rows.Count > 0;
-                btnRecalcDaily.Enabled = _dtDaily.Rows.Count > 0;
-                btnRecalcHourly.Enabled = _dtHourly.Rows.Count > 0;
-                chkAllContractual.Enabled = _dtContractual.Rows.Count > 0;
-                chkAllDaily.Enabled = _dtDaily.Rows.Count > 0;
-                chkAllHourly.Enabled = _dtHourly.Rows.Count > 0;
-
-                _isLoadedFromDb = true;
-                RefreshAllSummaries();
-
-                ToastHelper.Show(
-                    $"سوابق قبلی بارگذاری شد. پرسنل: {_dtContractual.Rows.Count} | روزمزد: {_dtDaily.Rows.Count} | ساعتی: {_dtHourly.Rows.Count}",
-                    isSuccess: true);
-            }
-            finally
-            {
-                if (loadLockAcquired) { try { _loadLock.Release(); } catch { } }
-                try { _actionLock.Release(); } catch { }
-            }
-        }
-
-        private async void BtnCalculateAll_Click(object? sender, EventArgs e)
-        {
-            if (cmbYear.SelectedItem == null || cmbMonth.SelectedItem == null)
-            {
-                ModernMessageBox.ShowWarning("لطفاً سال و ماه را انتخاب کنید.");
-                return;
-            }
-
-            if (!await _actionLock.WaitAsync(0))
-            {
-                ModernMessageBox.ShowWarning("یک عملیات دیگر در حال اجراست. لطفاً صبر کنید.");
-                return;
-            }
-
-            try
-            {
-                int year = Convert.ToInt32(cmbYear.SelectedItem);
-                int month = Convert.ToInt32(cmbMonth.SelectedItem);
-
-                var (checkSuccess, hasSaved) = await AsyncHelper.RunWithLoading(this, async () =>
-                    await _payrollRepository.HasPayrollsForMonthAsync(year, month),
-                    "در حال بررسی سوابق...");
-
-                if (!checkSuccess) return;
-
-                if (hasSaved)
-                {
-                    var confirm = ModernMessageBox.AskConfirm(
-                        "⚠️ برای این ماه سوابق ذخیره‌شده وجود دارد.\n\n" +
-                        "«محاسبه همه» مقادیر ذخیره‌شده را بازنویسی می‌کند.\n" +
-                        "اگر فقط می‌خواهید بعضی افراد را اصلاح کنید، ابتدا آن‌ها را تیک بزنید و «محاسبه مجدد» را بزنید.\n\n" +
-                        "آیا می‌خواهید همه را از نو محاسبه کنید؟",
-                        "تأیید محاسبه‌ی مجدد همه");
-                    if (!confirm) return;
-                }
-
-                btnSave.Enabled = false;
-                btnRecalcContractual.Enabled = false;
-                btnRecalcDaily.Enabled = false;
-                btnRecalcHourly.Enabled = false;
-                chkAllContractual.Enabled = false;
-                chkAllDaily.Enabled = false;
-                chkAllHourly.Enabled = false;
-
-                List<PayrollResult>? allResults = null;
-                List<Employee>? employeesList = null;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var settingsRepo = new SalarySettingsRepository(_connectionString);
-                    var settings = await settingsRepo.GetByYearAsync(year);
-
-                    if (settings == null)
-                        throw new InvalidOperationException($"تنظیمات حقوق برای سال {year} یافت نشد. ابتدا از منوی تنظیمات، مبالغ سال را ذخیره کنید.");
-                    if (settings.MinimumWage <= 0)
-                        throw new InvalidOperationException("حداقل حقوق در تنظیمات صفر است. ابتدا تنظیمات سال را کامل کنید.");
-
-                    var empRepo = new EmployeeRepository(_connectionString);
-                    employeesList = await empRepo.GetEmployeesWithDetailsAsync("", false);
-
-                    var attRepo = new AttendanceRepository(_connectionString);
-                    var attendances = await attRepo.GetAttendanceForMonthAsync(year, month);
-
-                    var activeLoans = await _loanRepository.GetActiveLoansAsync();
-                    var activeSuppIns = await _suppInsuranceRepository.GetActiveInsurancesAsync();
-                    var activeCarIns = await _carInsuranceRepository.GetActiveCarInsurancesAsync();
-
-                    var taxBrackets = _calculatorService.GetTaxBracketsSafe(year);
-
-                    var loansByEmployee = activeLoans.GroupBy(l => l.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-                    var suppInsByEmployee = activeSuppIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-                    var carInsByEmployee = activeCarIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-
-                    allResults = await Task.Run(() =>
-                    {
-                        var results = new List<PayrollResult>();
-                        foreach (var emp in employeesList)
-                        {
-                            var att = attendances.Find(a => a.EmployeeId == emp.Id) ?? new Attendance
-                            {
-                                EmployeeId = emp.Id,
-                                Year = year,
-                                Month = month,
-                                WorkingDays = 30,
-                                OvertimeHours = 0,
-                                AbsenceDays = 0
-                            };
-
-                            decimal loanInstallment = 0;
-                            if (loansByEmployee.TryGetValue(emp.Id, out var empLoans) && empLoans.Count > 0)
-                                loanInstallment = Math.Min(empLoans.Sum(l => l.MonthlyInstallment), empLoans.Sum(l => l.RemainingAmount));
-
-                            decimal suppInsInstallment = 0;
-                            if (suppInsByEmployee.TryGetValue(emp.Id, out var empIns) && empIns.Count > 0)
-                                suppInsInstallment = Math.Min(empIns.Sum(i => i.MonthlyInstallment), empIns.Sum(i => i.RemainingAmount));
-
-                            decimal carInsInstallment = 0;
-                            if (carInsByEmployee.TryGetValue(emp.Id, out var empCarIns) && empCarIns.Count > 0)
-                                carInsInstallment = Math.Min(empCarIns.Sum(i => i.MonthlyInstallment), empCarIns.Sum(i => i.RemainingAmount));
-
-                            var result = _calculatorService.CalculatePayroll(
-                                emp, att, settings, loanInstallment, suppInsInstallment, carInsInstallment, 0, taxBrackets);
-
-                            results.Add(result);
-                        }
-                        return results;
-                    });
-                }, "در حال محاسبه حقوق پرسنل...");
-
-                if (!success || allResults == null || employeesList == null) return;
-
-                _currentEmployees = employeesList;
-                _currentYear = year;
-                _currentMonth = month;
-                _resultsByCode.Clear();
-                _isLoadedFromDb = false;
-
-                _dtContractual = CreatePayrollDataTable();
-                _dtDaily = CreatePayrollDataTable();
-                _dtHourly = CreatePayrollDataTable();
-
-                foreach (var res in allResults)
-                {
-                    _resultsByCode[res.PersonnelCode ?? ""] = res;
-                    var group = GetTypeGroup(res.PersonnelType);
-                    var target = group switch
-                    {
-                        TabKey.Daily => _dtDaily,
-                        TabKey.Hourly => _dtHourly,
-                        _ => _dtContractual
-                    };
-                    target.Rows.Add(BuildRowValues(res));
-                }
-
-                dgvContractual.DataSource = null;
-                dgvContractual.DataSource = _dtContractual;
-                ConfigurePayrollGrid(dgvContractual, TabKey.Contractual);
-
-                dgvDaily.DataSource = null;
-                dgvDaily.DataSource = _dtDaily;
-                ConfigurePayrollGrid(dgvDaily, TabKey.Daily);
-
-                dgvHourly.DataSource = null;
-                dgvHourly.DataSource = _dtHourly;
-                ConfigurePayrollGrid(dgvHourly, TabKey.Hourly);
-
-                btnSave.Enabled = true;
-                btnRecalcContractual.Enabled = _dtContractual.Rows.Count > 0;
-                btnRecalcDaily.Enabled = _dtDaily.Rows.Count > 0;
-                btnRecalcHourly.Enabled = _dtHourly.Rows.Count > 0;
-                chkAllContractual.Enabled = _dtContractual.Rows.Count > 0;
-                chkAllDaily.Enabled = _dtDaily.Rows.Count > 0;
-                chkAllHourly.Enabled = _dtHourly.Rows.Count > 0;
-                chkAllContractual.Checked = false;
-                chkAllDaily.Checked = false;
-                chkAllHourly.Checked = false;
-
-                RefreshAllSummaries();
-
-                ToastHelper.Show(
-                    $"محاسبات انجام شد. پرسنل: {_dtContractual.Rows.Count} | روزمزد: {_dtDaily.Rows.Count} | ساعتی: {_dtHourly.Rows.Count}",
-                    isSuccess: true);
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PayrollProcessForm.BtnCalculateAll_Click");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در محاسبه:\n" + ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
-        }
-
-        private async Task RecalculateSelectedAsync(TabKey key)
-        {
-            var dt = GetDt(key);
-            if (dt == null || dt.Rows.Count == 0)
-            {
-                ModernMessageBox.ShowWarning("ابتدا «محاسبه همه» یا بارگذاری ماه را انجام دهید.");
-                return;
-            }
-
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                var dgv = GetDgv(key);
-                dgv.EndEdit();
-
-                var selectedCodes = new HashSet<string>(StringComparer.Ordinal);
-                var otherDeductionsByCode = new Dictionary<string, decimal>(StringComparer.Ordinal);
-
-                foreach (DataRow row in dt.Rows)
-                {
-                    if (row["Selected"] is not bool b || !b) continue;
-                    string code = row["PersonnelCode"]?.ToString() ?? "";
-                    if (string.IsNullOrEmpty(code)) continue;
-
-                    selectedCodes.Add(code);
-                    otherDeductionsByCode[code] = row["OtherDeductions"] != DBNull.Value
-                        ? Convert.ToDecimal(row["OtherDeductions"]) : 0m;
-                }
-
-                if (selectedCodes.Count == 0)
-                {
-                    ModernMessageBox.ShowWarning("لطفاً حداقل یک کارمند را انتخاب کنید.");
-                    return;
-                }
-
-                int year = _currentYear;
-                int month = _currentMonth;
-
-                List<(string Code, PayrollResult Result)>? recalcResults = null;
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var settingsRepo = new SalarySettingsRepository(_connectionString);
-                    var settings = await settingsRepo.GetByYearAsync(year);
-                    if (settings == null)
-                        throw new InvalidOperationException($"تنظیمات حقوق سال {year} یافت نشد.");
-
-                    var empRepo = new EmployeeRepository(_connectionString);
-                    var employeesList = await empRepo.GetEmployeesWithDetailsAsync("", false);
-
-                    var attRepo = new AttendanceRepository(_connectionString);
-                    var attendances = await attRepo.GetAttendanceForMonthAsync(year, month);
-
-                    var activeLoans = await _loanRepository.GetActiveLoansAsync();
-                    var activeSuppIns = await _suppInsuranceRepository.GetActiveInsurancesAsync();
-                    var activeCarIns = await _carInsuranceRepository.GetActiveCarInsurancesAsync();
-
-                    var taxBrackets = _calculatorService.GetTaxBracketsSafe(year);
-
-                    var loansByEmployee = activeLoans.GroupBy(l => l.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-                    var suppInsByEmployee = activeSuppIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-                    var carInsByEmployee = activeCarIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
-
-                    var employeesByCode = employeesList
-                        .Where(emp => selectedCodes.Contains(emp.PersonnelCode ?? ""))
-                        .ToDictionary(emp => emp.PersonnelCode ?? "", emp => emp, StringComparer.Ordinal);
-
-                    recalcResults = await Task.Run(() =>
-                    {
-                        var list = new List<(string, PayrollResult)>();
-
-                        foreach (var code in selectedCodes)
-                        {
-                            if (!employeesByCode.TryGetValue(code, out var emp)) continue;
-
-                            var att = attendances.Find(a => a.EmployeeId == emp.Id) ?? new Attendance
-                            {
-                                EmployeeId = emp.Id,
-                                Year = year,
-                                Month = month,
-                                WorkingDays = 30,
-                                OvertimeHours = 0,
-                                AbsenceDays = 0
-                            };
-
-                            decimal loanInstallment = 0;
-                            if (loansByEmployee.TryGetValue(emp.Id, out var empLoans) && empLoans.Count > 0)
-                                loanInstallment = Math.Min(empLoans.Sum(l => l.MonthlyInstallment), empLoans.Sum(l => l.RemainingAmount));
-
-                            decimal suppInsInstallment = 0;
-                            if (suppInsByEmployee.TryGetValue(emp.Id, out var empIns) && empIns.Count > 0)
-                                suppInsInstallment = Math.Min(empIns.Sum(i => i.MonthlyInstallment), empIns.Sum(i => i.RemainingAmount));
-
-                            decimal carInsInstallment = 0;
-                            if (carInsByEmployee.TryGetValue(emp.Id, out var empCarIns) && empCarIns.Count > 0)
-                                carInsInstallment = Math.Min(empCarIns.Sum(i => i.MonthlyInstallment), empCarIns.Sum(i => i.RemainingAmount));
-
-                            otherDeductionsByCode.TryGetValue(code, out decimal preservedOtherDed);
-
-                            var result = _calculatorService.CalculatePayroll(
-                                emp, att, settings, loanInstallment, suppInsInstallment, carInsInstallment, preservedOtherDed, taxBrackets);
-
-                            list.Add((code, result));
-                        }
-                        return list;
-                    });
-
-                    _currentEmployees = employeesList;
-                }, $"در حال محاسبه مجدد {selectedCodes.Count} نفر...");
-
-                if (!success || recalcResults == null) return;
-
-                var recalcDict = recalcResults.ToDictionary(x => x.Code, x => x.Result, StringComparer.Ordinal);
-                foreach (DataRow row in dt.Rows)
-                {
-                    string code = row["PersonnelCode"]?.ToString() ?? "";
-                    if (!recalcDict.TryGetValue(code, out var newResult)) continue;
-
-                    ApplyResultToRow(row, newResult);
-                    _resultsByCode[code] = newResult;
-                }
-
-                dgv.Refresh();
-                btnSave.Enabled = true;
-                RefreshSummary(key);
-
-                ToastHelper.Show($"{recalcResults.Count} نفر با موفقیت محاسبه مجدد شدند.", isSuccess: true);
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PayrollProcessForm.RecalculateSelectedAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در محاسبه مجدد:\n" + ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
-        }
-
-        private async void BtnSave_Click(object? sender, EventArgs e)
-        {
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                if (cmbYear.SelectedItem == null || cmbMonth.SelectedItem == null)
-                {
-                    ModernMessageBox.ShowWarning("سال و ماه را انتخاب کنید.");
-                    return;
-                }
-
-                int selectedYear = Convert.ToInt32(cmbYear.SelectedItem);
-                int selectedMonth = Convert.ToInt32(cmbMonth.SelectedItem);
-
-                if (selectedYear != _currentYear || selectedMonth != _currentMonth)
-                {
-                    ModernMessageBox.ShowWarning(
-                        "⚠️ ماه/سال انتخاب‌شده با داده‌های نمایش‌داده‌شده تطابق ندارد.\n\n" +
-                        $"سال/ماه انتخاب‌شده: {selectedYear}/{selectedMonth}\n" +
-                        $"سال/ماه داده‌های موجود: {_currentYear}/{_currentMonth}\n\n" +
-                        "لطفاً پس از تغییر ماه/سال، صبر کنید تا داده‌ها بارگذاری شوند، یا دوباره «محاسبه همه» را بزنید.");
-                    return;
-                }
-
-                var allRows = new List<DataRow>();
-                if (_dtContractual != null) allRows.AddRange(_dtContractual.Rows.Cast<DataRow>());
-                if (_dtDaily != null) allRows.AddRange(_dtDaily.Rows.Cast<DataRow>());
-                if (_dtHourly != null) allRows.AddRange(_dtHourly.Rows.Cast<DataRow>());
-
-                if (allRows.Count == 0)
-                {
-                    ModernMessageBox.ShowWarning("ابتدا «محاسبه همه» را بزنید یا ماه دارای سابقه را بارگذاری کنید.");
-                    return;
-                }
-
-                dgvContractual.EndEdit();
-                dgvDaily.EndEdit();
-                dgvHourly.EndEdit();
-
-                int year = _currentYear;
-                int month = _currentMonth;
-
-                var (checkSuccess, alreadySaved) = await AsyncHelper.RunWithLoading(this, async () =>
-                    await _payrollRepository.HasPayrollsForMonthAsync(year, month),
-                    "در حال بررسی سوابق...");
-
-                if (!checkSuccess) return;
-
-                if (alreadySaved)
-                {
-                    var result = ModernMessageBox.AskConfirm(
-                        "⚠️ فیش‌های حقوقی این ماه قبلاً ذخیره شده‌اند!\n\n" +
-                        "با تایید شما:\n" +
-                        "  • اقساط کسر شده در فیش‌های قبلی به حساب بدهی کارمندان برگردانده می‌شود\n" +
-                        "  • فیش‌ها با مقادیر جدید بازنویسی می‌شوند\n" +
-                        "  • اقساط جدید (مطابق محاسبه فعلی) کسر می‌گردد\n\n" +
-                        "آیا ادامه می‌دهید؟",
-                        "هشدار ذخیره مجدد");
-                    if (!result) return;
-                }
-
-                decimal totalStaffNetPay = _dtContractual != null
-                    ? _dtContractual.AsEnumerable().Sum(r => r["NetPay"] == DBNull.Value ? 0m : Convert.ToDecimal(r["NetPay"]))
-                    : 0m;
-                decimal totalWorkerNetPay = (_dtDaily != null
-                    ? _dtDaily.AsEnumerable().Sum(r => r["NetPay"] == DBNull.Value ? 0m : Convert.ToDecimal(r["NetPay"]))
-                    : 0m) +
-                    (_dtHourly != null
-                    ? _dtHourly.AsEnumerable().Sum(r => r["NetPay"] == DBNull.Value ? 0m : Convert.ToDecimal(r["NetPay"]))
-                    : 0m);
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var records = new List<PayrollRecord>();
-                    foreach (var row in allRows)
-                    {
-                        records.Add(new PayrollRecord
-                        {
-                            EmployeeId = Convert.ToInt32(row["EmployeeId"]),
-                            Year = year,
-                            Month = month,
-                            BaseSalary = GetDecimal(row, "BaseSalary"),
-                            // 👈 مبلغ اضافه کار به دیتابیس فرستاده می‌شود
-                            OvertimePay = GetDecimal(row, "OvertimePay"),
-                            TotalEarnings = GetDecimal(row, "TotalEarnings"),
-                            TotalDeductions = GetDecimal(row, "TotalDeductions"),
-                            NetPay = GetDecimal(row, "NetPay"),
-                            InsuranceEmployee = GetDecimal(row, "InsuranceEmployee"),
-                            InsuranceEmployer = GetDecimal(row, "InsuranceEmployer"),
-                            IncomeTax = GetDecimal(row, "IncomeTax"),
-                            LoanDeduction = GetDecimal(row, "LoanDeduction"),
-                            SupplementaryInsuranceDeduction = GetDecimal(row, "SupplementaryInsuranceDeduction"),
-                            CarInsuranceDeduction = GetDecimal(row, "CarInsuranceDeduction"),
-                            OtherDeductions = GetDecimal(row, "OtherDeductions"),
-                            AbsenceDeduction = GetDecimal(row, "AbsenceDeduction")
-                        });
-                    }
-
-                    var loanDeductions = records.Where(r => r.LoanDeduction > 0).GroupBy(r => r.EmployeeId).ToDictionary(g => g.Key, g => g.Sum(x => x.LoanDeduction));
-                    var suppInsDeductions = records.Where(r => r.SupplementaryInsuranceDeduction > 0).GroupBy(r => r.EmployeeId).ToDictionary(g => g.Key, g => g.Sum(x => x.SupplementaryInsuranceDeduction));
-                    var carInsDeductions = records.Where(r => r.CarInsuranceDeduction > 0).GroupBy(r => r.EmployeeId).ToDictionary(g => g.Key, g => g.Sum(x => x.CarInsuranceDeduction));
-
-                    if (alreadySaved)
-                    {
-                        await _payrollRepository.ReSavePayrollsForMonthWithInstallmentRestoreAsync(
-                            year, month, records,
-                            loanDeductions, suppInsDeductions, carInsDeductions);
-                    }
-                    else
-                    {
-                        await _payrollRepository.SavePayrollsAndDeductInstallmentsAsync(
-                            records, loanDeductions, suppInsDeductions, carInsDeductions);
-                    }
-                }, alreadySaved
-                    ? "در حال بازنویسی فیش‌ها و بازمحاسبه اقساط..."
-                    : "در حال ذخیره فیش‌های حقوقی...");
-
-                if (success)
-                {
-                    string msg = alreadySaved
-                        ? "فیش‌ها بازنویسی و اقساط به‌درستی بازمحاسبه شدند."
-                        : "تمام فیش‌های حقوقی ذخیره شدند و اقساط کسر گردید.";
-                    ToastHelper.Show(msg, isSuccess: true);
-                    btnSave.Enabled = false;
-                    _isLoadedFromDb = true;
-
-                    if (!alreadySaved)
-                    {
-                        await AskForPayrollTransactionAsync(totalStaffNetPay, totalWorkerNetPay);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "PayrollProcessForm.BtnSave_Click");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در ذخیره:\n" + ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
-        }
-
-        private async Task AskForPayrollTransactionAsync(decimal staffNetPay, decimal workerNetPay)
-        {
-            if (staffNetPay <= 0 && workerNetPay <= 0) return;
-
-            var accounts = await _bankRepo.GetActiveAsync();
-            if (accounts == null || accounts.Count == 0)
-            {
-                ModernMessageBox.ShowWarning("هیچ حساب بانکی فعالی برای ثبت هزینه حقوق یافت نشد.");
-                return;
-            }
-
-            using var form = new Form();
-            form.Text = "ثبت خودکار هزینه حقوق و دستمزد در نقدینگی";
-            form.Size = new Size(600, 380);
-            form.StartPosition = FormStartPosition.CenterParent;
-            form.FormBorderStyle = FormBorderStyle.FixedDialog;
-            form.MaximizeBox = false;
-            form.MinimizeBox = false;
-            form.RightToLeft = RightToLeft.Yes;
-            form.RightToLeftLayout = true;
-            form.Font = UIHelper.PersianFont(11f);
-            form.BackColor = Color.White;
-
-            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(15) };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-            var lblMessage = new Label
-            {
-                Text = "فیش‌های حقوقی با موفقیت ذخیره شدند.\nآیا مایلید هزینه‌های زیر به صورت خودکار از حساب‌های بانکی کسر شوند؟",
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Font = UIHelper.PersianFont(11f, FontStyle.Bold),
-                ForeColor = UIHelper.WarmText
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+                FlowDirection = FlowDirection.RightToLeft, RightToLeft = RightToLeft.Yes,
+                Margin = Padding.Empty, Padding = Padding.Empty, BackColor = Color.Transparent,
+                Anchor = AnchorStyles.None
             };
-
-            var pnlStaff = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
-            pnlStaff.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-            pnlStaff.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-            pnlStaff.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-
-            var pnlStaffHeader = new Panel { Dock = DockStyle.Fill };
-            pnlStaffHeader.Controls.Add(new Label { Text = "👨‍💼 حقوق پرسنل (ماهانه)", Font = UIHelper.PersianFont(11f, FontStyle.Bold), ForeColor = UIHelper.SectionBlue, Dock = DockStyle.Top, Height = 25 });
-            pnlStaffHeader.Controls.Add(new Label { Text = $"{NumberHelper.FormatThousands(staffNetPay, usePersianDigits: true)} ریال", Font = UIHelper.PersianFont(12f, FontStyle.Bold), Dock = DockStyle.Bottom, Height = 25 });
-
-            var cmbStaffAcc = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = "DisplayTitle", ValueMember = "Id", DataSource = new List<CompanyBankAccount>(accounts), Margin = new Padding(5, 25, 5, 25) };
-            var chkStaff = new CheckBox { Text = "ثبت شود", AutoSize = true, Checked = staffNetPay > 0, Enabled = staffNetPay > 0, Dock = DockStyle.Fill, Margin = new Padding(10, 25, 5, 0) };
-
-            pnlStaff.Controls.Add(pnlStaffHeader, 0, 0);
-            pnlStaff.Controls.Add(cmbStaffAcc, 1, 0);
-            pnlStaff.Controls.Add(chkStaff, 2, 0);
-
-            var pnlWorker = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
-            pnlWorker.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-            pnlWorker.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40F));
-            pnlWorker.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-
-            var pnlWorkerHeader = new Panel { Dock = DockStyle.Fill };
-            pnlWorkerHeader.Controls.Add(new Label { Text = "👷 دستمزد کارگران (روزمزد/ساعتی)", Font = UIHelper.PersianFont(11f, FontStyle.Bold), ForeColor = UIHelper.SectionOrange, Dock = DockStyle.Top, Height = 25 });
-            pnlWorkerHeader.Controls.Add(new Label { Text = $"{NumberHelper.FormatThousands(workerNetPay, usePersianDigits: true)} ریال", Font = UIHelper.PersianFont(12f, FontStyle.Bold), Dock = DockStyle.Bottom, Height = 25 });
-
-            var cmbWorkerAcc = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = "DisplayTitle", ValueMember = "Id", DataSource = new List<CompanyBankAccount>(accounts), Margin = new Padding(5, 25, 5, 25) };
-            var chkWorker = new CheckBox { Text = "ثبت شود", AutoSize = true, Checked = workerNetPay > 0, Enabled = workerNetPay > 0, Dock = DockStyle.Fill, Margin = new Padding(10, 25, 5, 0) };
-
-            pnlWorker.Controls.Add(pnlWorkerHeader, 0, 0);
-            pnlWorker.Controls.Add(cmbWorkerAcc, 1, 0);
-            pnlWorker.Controls.Add(chkWorker, 2, 0);
-
-            var btnConfirm = UIHelper.CreateButton("✔ تایید و کسر از حساب‌ها", UIHelper.ActionGreen, 220, 45);
-            btnConfirm.Anchor = AnchorStyles.None;
-
-            mainLayout.Controls.Add(lblMessage, 0, 0);
-            mainLayout.Controls.Add(pnlStaff, 0, 1);
-            mainLayout.Controls.Add(pnlWorker, 0, 2);
-            mainLayout.Controls.Add(btnConfirm, 0, 3);
-
-            form.Controls.Add(mainLayout);
-
-            bool processStaff = false, processWorker = false;
-            CompanyBankAccount? staffAcc = null, workerAcc = null;
-
-            btnConfirm.Click += (s, e) =>
-            {
-                if (chkStaff.Checked && cmbStaffAcc.SelectedItem is CompanyBankAccount sAcc)
-                {
-                    processStaff = true;
-                    staffAcc = sAcc;
-                }
-                if (chkWorker.Checked && cmbWorkerAcc.SelectedItem is CompanyBankAccount wAcc)
-                {
-                    processWorker = true;
-                    workerAcc = wAcc;
-                }
-                form.DialogResult = DialogResult.OK;
-                form.Close();
-            };
-
-            if (form.ShowDialog(this) == DialogResult.OK)
-            {
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var transRepo = new CashTransactionRepository(_connectionString);
-
-                    if (processStaff && staffAcc != null)
-                    {
-                        await transRepo.AddPayrollTransactionAsync(staffAcc.Id, staffAcc.Title, staffNetPay, _currentYear, _currentMonth, $"پرداخت حقوق پرسنل (ماهانه) - {_currentMonth}/{_currentYear}");
-                    }
-
-                    if (processWorker && workerAcc != null)
-                    {
-                        await transRepo.AddPayrollTransactionAsync(workerAcc.Id, workerAcc.Title, workerNetPay, _currentYear, _currentMonth, $"پرداخت دستمزد کارگران (روزمزد/ساعتی) - {_currentMonth}/{_currentYear}");
-                    }
-                }, "در حال ثبت هزینه‌ها در نقدینگی...");
-
-                if (success && !IsDisposed)
-                {
-                    ToastHelper.Show("هزینه‌های حقوق و دستمزد با موفقیت از حساب‌ها کسر شدند.", isSuccess: true);
-                }
-            }
+            foreach (var c in items) f.Controls.Add(c);
+            return f;
         }
 
-        private void HandleOtherDeductionsEdit(DataGridView dgv, TabKey key, DataGridViewCellEventArgs e)
+        Panel Divider() => new Panel
+        {
+            Width = 1, Height = 28, BackColor = ModernTheme.Border,
+            Margin = new Padding(16, 0, 16, 0), Anchor = AnchorStyles.None
+        };
+
+        // راست → چپ:  [دوره] | [محاسبه‌ها] ........ [حذف | ذخیره]
+        var bar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1,
+            RightToLeft = RightToLeft.Yes, BackColor = Color.Transparent, Margin = Padding.Empty
+        };
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bar.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+        bar.Controls.Add(Group(PeriodLabel("سال"), cmbYear, PeriodLabel("ماه"), cmbMonth), 0, 0);
+        bar.Controls.Add(Divider(), 1, 0);
+        bar.Controls.Add(Group(btnCalculate, btnCalcMissing, btnRecalcSelected), 2, 0);
+        bar.Controls.Add(Group(btnDelete, btnSave), 4, 0);
+
+        var pnlTop = new ModernCard("", ModernTheme.Primary, 1) { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8) };
+        pnlTop.Body.Controls.Add(bar, 0, 0);
+
+        // ─── کارت‌های خلاصه ───
+        var strip = ModernReport.CreateStatStrip(3, 88);
+        _stSaved = strip.Add("ذخیره‌شده", ModernTheme.Success, "فیش ثبت‌شده در دیتابیس");
+        _stUnsaved = strip.Add("محاسبه‌شده و ذخیره‌نشده", ModernTheme.Warning, "در انتظار ذخیره");
+        _stNet = strip.Add("جمع خالص پرداختی (این ماه)", ModernTheme.Primary, "");
+        foreach (var card in new[] { _stSaved, _stUnsaved, _stNet }) card.ValueFontSize = 15f;
+        _stSaved.SetCount(0, "نفر");
+        _stUnsaved.SetCount(0, "نفر");
+        _stNet.SetAmount(0, "ریال");
+        strip.Dock = DockStyle.Fill;
+        strip.Margin = new Padding(0, 0, 0, 10);
+
+        // ─── تب‌های قطعه‌ای (با شمارنده‌ی نفرات) + راهنمای رنگ ردیف‌ها ───
+        _tabs = new PayrollSegmentTabs { Dock = DockStyle.Right, Width = 540 };
+        _tabs.AddTab("قراردادی / ماهانه");
+        _tabs.AddTab("روزمزد");
+        _tabs.AddTab("ساعتی");
+        _tabs.SelectedIndexChanged += (s, e) => ShowActiveGrid();
+
+        var legend = new PayrollLegend { Dock = DockStyle.Left, Width = 300 };
+
+        var tabHeader = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 8), BackColor = Color.Transparent, Margin = Padding.Empty };
+        tabHeader.Controls.Add(legend);
+        tabHeader.Controls.Add(_tabs);
+
+        // ─── جدول‌ها (هر سه داخل یک کادر؛ فقط یکی نمایش داده می‌شود) ───
+        dgvContractual = CreateGrid(PayrollKind.Monthly);
+        dgvDaily = CreateGrid(PayrollKind.Daily);
+        dgvHourly = CreateGrid(PayrollKind.Hourly);
+
+        var gridHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(1), BackColor = ModernTheme.Border, Margin = Padding.Empty };
+        foreach (var g in new[] { dgvHourly, dgvDaily, dgvContractual }) { g.Dock = DockStyle.Fill; gridHost.Controls.Add(g); }
+        ShowActiveGrid();
+
+        // ─── نوار پیام (فقط وقتی ردیف ذخیره‌نشده هست دیده می‌شود) ───
+        _infoBar = new PayrollInfoBar { Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 0), Visible = false };
+
+        _mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(14, 12, 14, 10) };
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 74F));    // نوار ابزار
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 98F));    // کارت‌های خلاصه
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52F));    // تب‌ها
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));    // جدول
+        _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));     // پیام (پویا)
+        _mainLayout.Controls.Add(pnlTop, 0, 0);
+        _mainLayout.Controls.Add(strip, 0, 1);
+        _mainLayout.Controls.Add(tabHeader, 0, 2);
+        _mainLayout.Controls.Add(gridHost, 0, 3);
+        _mainLayout.Controls.Add(_infoBar, 0, 4);
+        this.Controls.Add(_mainLayout);
+    }
+
+    /// <summary>دکمه‌ی نوار ابزار: متن + آیکن ترسیمی، عرض متناسب با متن</summary>
+    private static ModernButton ToolButton(string text, Color accent, ModernButtonStyle style, PayrollIcon icon)
+    {
+        var b = ModernButton.Create(text, accent, 400, 36, style);
+        Color iconColor = style == ModernButtonStyle.Filled ? Color.White : ModernPaint.Darken(accent, 40);
+        b.Icon = PayrollIcons.Make(icon, iconColor);
+        b.IconSize = 16;
+        b.Height = 36;
+        b.Width = TextRenderer.MeasureText(text, b.Font).Width + 16 + 8 + 36;   // متن + آیکن + فاصله + حاشیه
+        b.Margin = new Padding(4, 0, 4, 0);
+        return b;
+    }
+
+    private void ShowActiveGrid()
+    {
+        var active = ActiveGrid();
+        foreach (var g in new[] { dgvContractual, dgvDaily, dgvHourly })
+            g.Visible = ReferenceEquals(g, active);
+        active.BringToFront();
+    }
+
+    private DataGridView CreateGrid(PayrollKind kind)
+    {
+        var dgv = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AutoGenerateColumns = false,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = true
+        };
+        dgv.ApplyModernStyle();
+        dgv.UseAiryLook(48);
+        dgv.UseSelectionAccent(ModernTheme.Primary);
+        dgv.ReadOnly = false; // فقط ستون «انتخاب» قابل ویرایش است (بقیه ستون‌ها ReadOnly هستند)
+        dgv.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+        dgv.ColumnHeadersHeight = 50;
+
+        // عرض و عنوان دلخواه ستون‌ها؛ ModernGrid بعد از هر Bind ستون‌ها را «اندازه‌ی محتوا» و عنوان‌ها را ترجمه می‌کند
+        // و ظاهر سه تب ناهمسان می‌شد؛ در DataBindingComplete دوباره همین مقادیر اعمال می‌شوند.
+        var widths = new Dictionary<string, int>();
+        var headers = new Dictionary<string, string>();
+
+        void Col(string prop, string header, int width)
+        {
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = prop, DataPropertyName = prop, HeaderText = header, Width = width, MinimumWidth = 60 });
+            widths[prop] = width;
+            headers[prop] = header;
+        }
+
+        dgv.Columns.Add(new DataGridViewCheckBoxColumn { Name = "IsSelected", HeaderText = "انتخاب", Width = 64 });
+        widths["IsSelected"] = 64;
+        headers["IsSelected"] = "انتخاب";
+        Col("PersonnelCode", "کد پرسنلی", 80);          // فقط زیر نام نمایش داده می‌شود
+        dgv.Columns["PersonnelCode"]!.Visible = false;
+        Col("EmployeeName", "پرسنل", 250);
+        Col("StatusText", "وضعیت", 180);
+
+        // ─── مبنای کارکرد (بسته به نوع پرسنل) ───
+        var basis = new List<string>();
+        if (kind == PayrollKind.Daily) { Col("DailyWage", "حقوق روزانه", 110); basis.Add("DailyWage"); }
+        if (kind == PayrollKind.Hourly) { Col("HourlyWage", "حقوق ساعتی", 110); basis.Add("HourlyWage"); }
+        Col("WorkingDays", "روزهای کارکرد", 96); basis.Add("WorkingDays");
+        Col("OvertimeHours", "ساعت اضافه‌کار", 100); basis.Add("OvertimeHours");
+
+        // ─── اقلام حقوق و مزایا ───
+        // روزمزد: فقط حقوق و اضافه‌کار (مزایای ماهانه ندارد)؛ کسورات برای همه‌ی انواع پرسنل کامل است.
+        bool isDaily = kind == PayrollKind.Daily;
+        var earnings = new List<string>();
+        void Earn(string prop, string header, int width) { Col(prop, header, width); earnings.Add(prop); }
+
+        Earn("BaseSalary", isDaily ? "حقوق" : "حقوق پایه", 112);
+        if (!isDaily)
+        {
+            Earn("YearsBonus", "پایه سنوات", 104);
+            Earn("AttractionAllowance", "حق جذب", 104);
+            Earn("ResponsibilityAllowance", "حق مسئولیت", 108);
+            Earn("ManagementAllowance", "حق مدیریت", 104);
+            Earn("TechnicalAllowance", "حق فنی", 104);
+            Earn("HousingAllowance", "حق مسکن", 104);
+            Earn("GroceryAllowance", "حق خواربار", 104);
+            Earn("ChildAllowance", "حق اولاد", 104);
+            Earn("MarriageAllowance", "حق تأهل", 104);
+            Earn("TransportationAllowance", "حق ایاب و ذهاب", 116);
+            Earn("OtherAllowances", "سایر مزایا", 104);
+        }
+        Earn("OvertimePay", "اضافه کار", 108);
+        Earn("TotalEarnings", "جمع مزایا", 124);
+
+        // ─── کسورات ───
+        var deductions = new List<string>();
+        void Ded(string prop, string header, int width) { Col(prop, header, width); deductions.Add(prop); }
+
+        Ded("AbsenceHours", "ساعت کسر کار", 100);
+        Ded("AbsenceDeduction", "کسر غیبت", 104);
+        Ded("InsuranceEmployee", "بیمه کارمند", 112);
+        Ded("IncomeTax", "مالیات", 104);
+        Ded("LoanDeduction", "قسط وام", 104);
+        Ded("AdvanceDeduction", "مساعده", 104);
+        Ded("SupplementaryInsuranceDeduction", "بیمه تکمیلی", 108);
+        Ded("CarInsuranceDeduction", "بیمه ماشین", 108);
+        Ded("OtherDeductions", "سایر کسورات", 108);
+        Ded("TotalDeductions", "جمع کسور", 116);
+        Col("NetPay", "خالص پرداختی", 140);
+
+        // ستون‌های اول هنگام اسکرول افقی ثابت بمانند
+        dgv.Columns["IsSelected"]!.Frozen = true;
+        dgv.Columns["EmployeeName"]!.Frozen = true;
+
+        dgv.UsePersonColumn("EmployeeName", "PersonnelCode");
+        dgv.UseBadges("StatusText", new Dictionary<string, Color>
+        {
+            ["ذخیره‌شده"] = ModernTheme.Success,
+            ["محاسبه‌شده (ذخیره‌نشده)"] = ModernTheme.Warning
+        });
+
+        foreach (DataGridViewColumn col in dgv.Columns)
+            col.ReadOnly = col.Name != "IsSelected";
+
+        // ─── سربرگ گروه‌بندی‌شده با رنگ: مبنا (خنثی) / مزایا (سبز) / کسورات (قرمز) / خالص (آبی) ───
+        void Tint(IEnumerable<string> names, Color back, Color fore)
+        {
+            foreach (var n in names)
+            {
+                if (!dgv.Columns.Contains(n)) continue;
+                var st = dgv.Columns[n]!.HeaderCell.Style;
+                st.BackColor = back; st.SelectionBackColor = back;
+                st.ForeColor = fore; st.SelectionForeColor = fore;
+            }
+        }
+        Tint(earnings, ModernPaint.Blend(Color.White, ModernTheme.Success, 0.09f), ModernPaint.Darken(ModernTheme.Success, 90));
+        Tint(deductions, ModernPaint.Blend(Color.White, ModernTheme.Danger, 0.08f), ModernTheme.DangerText);
+        Tint(new[] { "NetPay" }, ModernPaint.Blend(Color.White, ModernTheme.Primary, 0.16f), ModernPaint.Darken(ModernTheme.Primary, 80));
+
+        // ستون «خالص پرداختی» کمی پررنگ‌تر از بقیه تا چشم اول به آن برسد
+        dgv.Columns["NetPay"]!.DefaultCellStyle.BackColor = ModernPaint.Blend(Color.White, ModernTheme.Success, 0.07f);
+
+        dgv.DataBindingComplete += (s, e) =>
+        {
+            foreach (DataGridViewColumn col in dgv.Columns)
+            {
+                if (widths.TryGetValue(col.Name, out int w)) col.Width = w;
+                if (headers.TryGetValue(col.Name, out string? h)) col.HeaderText = h;
+            }
+            dgv.ColumnHeadersHeight = 50;
+        };
+
+        // تیک چک‌باکس بلافاصله ثبت شود
+        dgv.CurrentCellDirtyStateChanged += (s, e) =>
+        {
+            if (dgv.IsCurrentCellDirty) dgv.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
+
+        dgv.CellFormatting += (s, e) =>
         {
             if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-            if (dgv.Columns[e.ColumnIndex].Name != "OtherDeductions") return;
 
-            string valStr = dgv.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? "0";
-            decimal newDeduction = NumberHelper.ParseFormatted(valStr);
+            // ردیف‌های محاسبه‌شده‌ی ذخیره‌نشده با رنگ زرد روشن مشخص می‌شوند
+            if (dgv.Rows[e.RowIndex].DataBoundItem is PayrollResult pr && !pr.IsSaved)
+                e.CellStyle.BackColor = ModernTheme.WarningSoft;
 
-            if (newDeduction < 0)
+            string colName = dgv.Columns[e.ColumnIndex].DataPropertyName;
+            if (e.CellStyle is not null)
             {
-                ModernMessageBox.ShowWarning("مبلغ سایر کسورات نمی‌تواند منفی باشد.");
-                newDeduction = 0;
+                if (colName == "NetPay") { e.CellStyle.Font = ModernTheme.GetFont(10.5f, FontStyle.Bold); e.CellStyle.ForeColor = ModernPaint.Darken(ModernTheme.Success, 70); }
+                else if (colName == "TotalDeductions") { e.CellStyle.Font = ModernTheme.GetFont(10.5f, FontStyle.Bold); e.CellStyle.ForeColor = ModernTheme.DangerText; }
+                else if (colName == "TotalEarnings") e.CellStyle.Font = ModernTheme.GetFont(10.5f, FontStyle.Bold);
+            }
+            if (colName == "OvertimeHours" && e.Value is decimal ot)
+            {
+                // ساعت اعشاری → ساعت:دقیقه (مثلاً ۷٫۵ → ۰۷:۳۰)
+                int totalMinutes = (int)Math.Round(Math.Abs(ot) * 60m, MidpointRounding.AwayFromZero);
+                string hhmm = $"{totalMinutes / 60:00}:{totalMinutes % 60:00}";
+                e.Value = StringHelper.ConvertToPersianDigits(hhmm);
+                e.FormattingApplied = true;
+            }
+            else if ((colName == "WorkingDays" || colName == "AbsenceHours") && e.Value is decimal qty)
+            {
+                e.Value = StringHelper.ConvertToPersianDigits(qty.ToString("0.##"));
+                e.FormattingApplied = true;
+            }
+            else if (colName != "PersonnelCode" && colName != "EmployeeName" && colName != "StatusText" && e.Value is decimal dec)
+            {
+                // مقدارهای صفر کم‌رنگ می‌شوند تا اعداد واقعی بیشتر دیده شوند
+                if (dec == 0m && e.CellStyle is not null && colName != "NetPay")
+                    e.CellStyle.ForeColor = ModernTheme.Placeholder;
+                e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true);
+                e.FormattingApplied = true;
+            }
+        };
+
+        // حالت خالی: به‌جای جدول سفید و بی‌صدا، توضیح و راهنمای شروع نمایش داده می‌شود
+        dgv.Paint += (s, e) =>
+        {
+            if (dgv.Rows.Count == 0) PaintEmptyState(dgv, e.Graphics);
+        };
+
+        return dgv;
+    }
+
+    private void PaintEmptyState(DataGridView dgv, Graphics g)
+    {
+        int top = dgv.ColumnHeadersHeight;
+        var area = new Rectangle(0, top, dgv.ClientSize.Width, Math.Max(0, dgv.ClientSize.Height - top - 24));
+        if (area.Width < 200 || area.Height < 150) return;
+
+        bool nothingAtAll = _rows.Count == 0;
+        string title = nothingAtAll
+            ? $"برای {PeriodText()} هنوز حقوقی ثبت یا محاسبه نشده است"
+            : "در این بخش پرسنلی وجود ندارد";
+        string hint = nothingAtAll
+            ? "برای شروع، دکمه‌ی «محاسبه همه» را بزنید؛ نتیجه را بررسی و سپس «ذخیره» کنید."
+            : "پرسنل این ماه در تب‌های دیگر قرار دارند.";
+
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        int d = 76;
+        int cx = area.X + area.Width / 2;
+        int cy = area.Y + area.Height / 2 - 34;
+        var circle = new Rectangle(cx - d / 2, cy - d / 2, d, d);
+        using (var br = new SolidBrush(ModernPaint.Blend(Color.White, ModernTheme.Primary, 0.12f)))
+            g.FillEllipse(br, circle);
+
+        // آیکن لیست داخل دایره
+        using (var pen = new Pen(ModernPaint.Darken(ModernTheme.Primary, 20), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                int y = cy - 11 + i * 11;
+                g.DrawLine(pen, cx - 4, y, cx + 14, y);
+                g.DrawLine(pen, cx - 15, y, cx - 12, y);
+            }
+        }
+
+        var flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.RightToLeft | TextFormatFlags.NoPrefix |
+                    TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.Top;
+        var titleRect = new Rectangle(area.X + 20, circle.Bottom + 16, area.Width - 40, 28);
+        TextRenderer.DrawText(g, title, ModernTheme.GetFont(12.5f, FontStyle.Bold), titleRect, ModernTheme.TextStrong, flags);
+        var hintRect = new Rectangle(area.X + 20, titleRect.Bottom + 4, area.Width - 40, 44);
+        TextRenderer.DrawText(g, hint, ModernTheme.GetFont(10f), hintRect, ModernTheme.TextMuted, flags);
+    }
+
+    private string PeriodText()
+    {
+        int y = _periodYear, m = _periodMonth;
+        if (y == 0 || m == 0) TryGetPeriod(out y, out m);
+        return $"{TranslationHelper.GetMonthName(m)} {StringHelper.ConvertToPersianDigits(y.ToString())}";
+    }
+
+    private DataGridView ActiveGrid() => _tabs.SelectedIndex switch
+    {
+        1 => dgvDaily,
+        2 => dgvHourly,
+        _ => dgvContractual
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    // نمایش / انتخاب
+    // ═══════════════════════════════════════════════════════════════
+    private void RebindGrids()
+    {
+        var ordered = _rows.Values.OrderBy(r => r.PersonnelCode).ThenBy(r => r.EmployeeName).ToList();
+
+        var contractual = new List<PayrollResult>();
+        var daily = new List<PayrollResult>();
+        var hourly = new List<PayrollResult>();
+
+        foreach (var r in ordered)
+        {
+            switch (PayrollCalculatorService.ResolveKind(r.PersonnelType))
+            {
+                case PayrollKind.Daily: daily.Add(r); break;
+                case PayrollKind.Hourly: hourly.Add(r); break;
+                default: contractual.Add(r); break;
+            }
+        }
+
+        dgvContractual.DataSource = new BindingList<PayrollResult>(contractual);
+        dgvDaily.DataSource = new BindingList<PayrollResult>(daily);
+        dgvHourly.DataSource = new BindingList<PayrollResult>(hourly);
+
+        _tabs.SetCount(0, contractual.Count);
+        _tabs.SetCount(1, daily.Count);
+        _tabs.SetCount(2, hourly.Count);
+
+        UpdateStatus();
+    }
+
+    private void UpdateStatus()
+    {
+        int total = _rows.Count;
+        int saved = _rows.Values.Count(r => r.IsSaved);
+        int unsaved = total - saved;
+
+        _stSaved.SetCount(saved, "نفر");
+        _stSaved.SubText = total == 0
+            ? "فیش ثبت‌شده در دیتابیس"
+            : $"از {StringHelper.ConvertToPersianDigits(total.ToString())} نفر";
+
+        _stUnsaved.SetCount(unsaved, "نفر");
+        _stUnsaved.SubText = unsaved == 0 ? "موردی در انتظار ذخیره نیست" : "در انتظار ذخیره";
+
+        _stNet.SetAmount(_rows.Values.Sum(r => r.NetPay), "ریال");
+        _stNet.SubText = PeriodText();
+
+        // پیام فقط وقتی لازم است نشان داده می‌شود؛ حالت «خالی» را خود جدول توضیح می‌دهد
+        bool show = unsaved > 0;
+        _infoBar.Message = show
+            ? $"{StringHelper.ConvertToPersianDigits(unsaved.ToString())} ردیف زردرنگ محاسبه شده‌اند ولی هنوز ذخیره نشده‌اند؛ برای ثبت نهایی «ذخیره» را بزنید."
+            : string.Empty;
+        _infoBar.Visible = show;
+        _mainLayout.RowStyles[4].Height = show ? 48F : 0F;
+
+        foreach (var g in new[] { dgvContractual, dgvDaily, dgvHourly }) g.Invalidate();
+    }
+
+    /// <summary>
+    /// ردیف‌های انتخاب‌شده: اگر کاربر تیک «انتخاب» زده باشد همان‌ها، وگرنه ردیف‌های هایلایت‌شده‌ی تب فعلی.
+    /// </summary>
+    private List<PayrollResult> GetSelectedResults()
+    {
+        var checkedRows = new List<PayrollResult>();
+        foreach (var grid in new[] { dgvContractual, dgvDaily, dgvHourly })
+        {
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                if (row.DataBoundItem is PayrollResult pr && row.Cells["IsSelected"].Value is bool b && b)
+                    checkedRows.Add(pr);
+            }
+        }
+        if (checkedRows.Count > 0) return checkedRows;
+
+        return ActiveGrid().SelectedRows
+            .Cast<DataGridViewRow>()
+            .Select(r => r.DataBoundItem)
+            .OfType<PayrollResult>()
+            .ToList();
+    }
+
+    private bool TryGetPeriod(out int year, out int month)
+    {
+        year = 0; month = 0;
+        if (cmbYear.SelectedItem is null || cmbMonth.SelectedItem is null) return false;
+        year = Convert.ToInt32(cmbYear.SelectedItem);
+        month = Convert.ToInt32(cmbMonth.SelectedItem);
+        return true;
+    }
+
+    private void SetBusy(bool busy)
+    {
+        _isBusy = busy;
+        // هنگام انجام کار، دکمه‌ها غیرفعال می‌شوند تا کلیک دوباره‌ی ناخواسته ممکن نباشد
+        foreach (var b in new[] { btnCalculate, btnCalcMissing, btnRecalcSelected, btnDelete, btnSave })
+            if (b is not null && !b.IsDisposed) b.Enabled = !busy;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // بارگذاری فیش‌های ذخیره‌شده
+    // ═══════════════════════════════════════════════════════════════
+    private static decimal D(DataRow row, string col)
+        => row.Table.Columns.Contains(col) && row[col] != DBNull.Value ? Convert.ToDecimal(row[col]) : 0m;
+
+    private static PayrollResult MapSaved(DataRow row)
+    {
+        var saved = new PayrollResult
+        {
+            EmployeeId = Convert.ToInt32(row["EmployeeId"]),
+            EmployeeName = row["EmployeeName"]?.ToString() ?? "",
+            PersonnelCode = row["PersonnelCode"]?.ToString() ?? "",
+            Year = Convert.ToInt32(row["Year"]),
+            Month = Convert.ToInt32(row["Month"]),
+            PersonnelType = row.Table.Columns.Contains("PersonnelType") && row["PersonnelType"] != DBNull.Value
+                ? row["PersonnelType"].ToString() ?? "ماهانه" : "ماهانه",
+
+            BaseSalary = D(row, "BaseSalary"),
+            YearsBonus = D(row, "YearsBonus"),
+            HousingAllowance = D(row, "HousingAllowance"),
+            GroceryAllowance = D(row, "GroceryAllowance"),
+            ChildAllowance = D(row, "ChildAllowance"),
+            AttractionAllowance = D(row, "AttractionAllowance"),
+            ResponsibilityAllowance = D(row, "ResponsibilityAllowance"),
+            ManagementAllowance = D(row, "ManagementAllowance"),
+            TechnicalAllowance = D(row, "TechnicalAllowance"),
+            MarriageAllowance = D(row, "MarriageAllowance"),
+            TransportationAllowance = D(row, "TransportationAllowance"),
+            OtherAllowances = D(row, "OtherAllowances"),
+            OvertimePay = D(row, "OvertimePay"),
+            TotalEarnings = D(row, "TotalEarnings"),
+
+            InsuranceBase = D(row, "InsuranceBase"),
+            TaxableBase = D(row, "TaxableBase"),
+            WorkingDays = D(row, "WorkingDays"),
+            OvertimeHours = D(row, "OvertimeHours"),
+            AbsenceHours = D(row, "AbsenceHours"),
+
+            AbsenceDeduction = D(row, "AbsenceDeduction"),
+            InsuranceEmployee = D(row, "InsuranceEmployee"),
+            InsuranceEmployer = D(row, "InsuranceEmployer"),
+            IncomeTax = D(row, "IncomeTax"),
+            LoanDeduction = D(row, "LoanDeduction"),
+            AdvanceDeduction = D(row, "AdvanceDeduction"),
+            SupplementaryInsuranceDeduction = D(row, "SupplementaryInsuranceDeduction"),
+            CarInsuranceDeduction = D(row, "CarInsuranceDeduction"),
+            OtherDeductions = D(row, "OtherDeductions"),
+            TotalDeductions = D(row, "TotalDeductions"),
+            NetPay = D(row, "NetPay"),
+
+            IsSaved = true
+        };
+
+        // «حقوق روزانه» در جدول Payrolls ذخیره نمی‌شود (فقط حقوق پایه و روزهای کارکرد)؛
+        // برای روزمزد از همان دو مقدار برگردانده می‌شود: حقوق پایه = روزهای کارکرد × دستمزد روزانه
+        if (saved.PersonnelType == "روزمزد" && saved.WorkingDays > 0 && saved.BaseSalary > 0)
+            saved.DailyWage = Math.Round(saved.BaseSalary / saved.WorkingDays, 0);
+
+        return saved;
+    }
+
+    private async Task LoadSavedAsync()
+    {
+        if (IsDisposed || _isBusy || !TryGetPeriod(out int year, out int month)) return;
+        SetBusy(true);
+        try
+        {
+            DataTable? dt = null;
+            bool ok = await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                dt = await _payrollRepo.GetSavedPayrollsAsync(year, month);
+            }, "در حال بارگذاری حقوق ذخیره‌شده...");
+
+            if (!ok || dt is null || IsDisposed) return;
+
+            _rows.Clear();
+            _savedDeductions.Clear();
+
+            foreach (DataRow row in dt.Rows)
+            {
+                var r = MapSaved(row);
+                _rows[r.EmployeeId] = r;
+                _savedDeductions[r.EmployeeId] = (r.LoanDeduction, r.AdvanceDeduction, r.SupplementaryInsuranceDeduction, r.CarInsuranceDeduction);
             }
 
-            if (dgv.Rows[e.RowIndex].DataBoundItem is not DataRowView drv) return;
-            string code = drv["PersonnelCode"]?.ToString() ?? "";
-            if (!_resultsByCode.TryGetValue(code, out var res)) return;
-
-            decimal oldDeduction = res.OtherDeductions;
-            decimal diff = newDeduction - oldDeduction;
-
-            res.OtherDeductions = newDeduction;
-            res.TotalDeductions += diff;
-            res.NetPay -= diff;
-            if (res.NetPay < 0) res.NetPay = 0;
-
-            drv["OtherDeductions"] = newDeduction;
-            drv["TotalDeductions"] = res.TotalDeductions;
-            drv["NetPay"] = res.NetPay;
-
-            dgv.InvalidateRow(e.RowIndex);
-            RefreshSummary(key);
+            _periodYear = year;
+            _periodMonth = month;
+            RebindGrids();
         }
+        finally { SetBusy(false); }
+    }
 
-        private void ToggleSelectAll(TabKey key)
+    private async Task OnPeriodChangedAsync()
+    {
+        if (!_formReady || _suppressPeriodChange || IsDisposed || _isBusy) return;
+        if (!TryGetPeriod(out int year, out int month)) return;
+        if (year == _periodYear && month == _periodMonth) return;
+
+        if (_rows.Values.Any(r => !r.IsSaved))
         {
-            var dt = GetDt(key);
-            var dgv = GetDgv(key);
-            var chk = GetChkAll(key);
-            if (dt == null || dgv == null || chk == null) return;
-
-            foreach (DataRow row in dt.Rows) row["Selected"] = chk.Checked;
-            dgv.Refresh();
-            RefreshSummary(key);
-        }
-
-        private void RefreshAllSummaries()
-        {
-            RefreshSummary(TabKey.Contractual);
-            RefreshSummary(TabKey.Daily);
-            RefreshSummary(TabKey.Hourly);
-        }
-
-        private void RefreshSummary(TabKey key)
-        {
-            var dt = GetDt(key);
-            var lbl = GetLblSummary(key);
-            if (lbl == null) return;
-
-            if (dt == null || dt.Rows.Count == 0)
+            if (!ModernMessageBox.AskConfirm(
+                    "محاسبه‌های ذخیره‌نشده‌ی ماه فعلی (ردیف‌های زرد) از بین می‌روند.\n\nادامه می‌دهید؟",
+                    "تغییر ماه"))
             {
-                lbl.Text = "— موردی یافت نشد —";
+                _suppressPeriodChange = true;
+                try
+                {
+                    cmbYear.SelectedItem = _periodYear;
+                    cmbMonth.SelectedItem = _periodMonth;
+                }
+                finally { _suppressPeriodChange = false; }
+                return;
+            }
+        }
+
+        await LoadSavedAsync();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // محاسبه
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// قسط ماهانه‌ی قابل کسر یک کارمند. دقیقاً هم‌منطق با PayrollRepository.DeductKindAsync:
+    /// برای هر ردیف فعال min(قسط، مانده) (اگر قسط ۰ بود کل مانده) و جمع ردیف‌ها.
+    /// </summary>
+    private static decimal SumInstallment<T>(
+        Dictionary<int, List<T>> map, int empId,
+        Func<T, decimal> installment, Func<T, decimal> remaining)
+    {
+        if (!map.TryGetValue(empId, out var list) || list.Count == 0) return 0m;
+
+        decimal sum = 0m;
+        foreach (var x in list)
+        {
+            decimal rem = remaining(x);
+            if (rem <= 0) continue;
+            decimal inst = installment(x);
+            sum += inst > 0 ? Math.Min(inst, rem) : rem;
+        }
+        return sum;
+    }
+
+    private async Task RecalculateSelectedAsync()
+    {
+        var selected = GetSelectedResults();
+        if (selected.Count == 0)
+        {
+            ModernMessageBox.ShowWarning("ابتدا یک یا چند نفر را انتخاب کنید (تیک «انتخاب» یا هایلایت ردیف).");
+            return;
+        }
+        await CalculateAsync(new HashSet<int>(selected.Select(r => r.EmployeeId)));
+    }
+
+    /// <param name="onlyEmpIds">null = همه‌ی پرسنل؛ در غیر این صورت فقط همین کارمندان محاسبه می‌شوند.</param>
+    /// <param name="onlyMissing">true = فقط کارمندانی که الآن هیچ ردیفی (ذخیره‌شده یا محاسبه‌شده) در لیست ندارند (مثلاً بعد از حذف).</param>
+    private async Task CalculateAsync(HashSet<int>? onlyEmpIds, bool onlyMissing = false)
+    {
+        if (IsDisposed || _isBusy || !TryGetPeriod(out int year, out int month)) return;
+
+        // اگر دوره با دوره‌ی نمایش‌داده‌شده فرق دارد (نباید پیش بیاید) اول فیش‌های آن دوره بارگذاری شود
+        if (year != _periodYear || month != _periodMonth)
+        {
+            await LoadSavedAsync();
+            if (year != _periodYear || month != _periodMonth) return;
+        }
+
+        SetBusy(true);
+        try
+        {
+            var newResults = new List<PayrollResult>();
+            var overdueAdvances = new List<string>();   // مساعده‌های کسرنشده‌ی ماه‌های قبل (برای هشدار)
+
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                var attRepo = new AttendanceRepository(_connectionString);
+                var settingsRepo = new SalarySettingsRepository(_connectionString);
+                var empRepo = new EmployeeRepository(_connectionString);
+                var loanRepo = new LoanRepository(_connectionString);
+                var suppInsRepo = new SupplementaryInsuranceRepository(_connectionString);
+                var carInsRepo = new CarInsuranceRepository(_connectionString);
+
+                var settings = await settingsRepo.GetByYearAsync(year);
+                if (settings is null) throw new Exception($"تنظیمات حقوق سال {year} یافت نشد.");
+
+                var attendances = await attRepo.GetAttendanceForMonthAsync(year, month);
+                var employees = await empRepo.GetEmployeesWithDetailsAsync("", true, false);
+
+                var activeLoans = await loanRepo.GetActiveLoansAsync();
+                var activeSuppIns = await suppInsRepo.GetActiveInsurancesAsync();
+                var activeCarIns = await carInsRepo.GetActiveCarInsurancesAsync();
+
+                // وام و مساعده جدا از هم محاسبه می‌شوند
+                var loansByEmp = activeLoans.Where(l => !l.IsAdvance).GroupBy(l => l.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
+                // مساعده فقط در ماه شروع خودش کسر می‌شود
+                var advByEmp = activeLoans.Where(l => l.IsAdvance && l.IsDueInPeriod(year, month))
+                                          .GroupBy(l => l.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
+                foreach (var l in activeLoans.Where(l => l.IsAdvance && l.RemainingAmount > 0 && l.IsOverdueBefore(year, month)))
+                    overdueAdvances.Add($"• {l.EmployeeName} — {NumberHelper.FormatThousands(l.RemainingAmount, usePersianDigits: true)} ریال (ماه شروع: {l.StartPeriod})");
+                var suppByEmp = activeSuppIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
+                var carByEmp = activeCarIns.GroupBy(i => i.EmployeeId).ToDictionary(g => g.Key, g => g.ToList());
+
+                var taxBrackets = (settings.TaxBrackets is not null && settings.TaxBrackets.Count > 0)
+                    ? settings.TaxBrackets
+                    : _calculator.GetTaxBracketsSafe(year);
+
+                var empById = employees.GroupBy(x => x.Id).ToDictionary(g => g.Key, g => g.First());
+
+                // روزمزدها: فقط کسانی که در همین ماه حکم دارند و کارکرد ثبت‌شده دارند محاسبه می‌شوند
+                var pc = new System.Globalization.PersianCalendar();
+                DateTime monthStart = pc.ToDateTime(year, month, 1, 0, 0, 0, 0);
+                DateTime monthEnd = pc.ToDateTime(year, month, pc.GetDaysInMonth(year, month), 23, 59, 59, 0);
+                var contractRepo = new EmployeeContractRepository(_connectionString);
+                var idsWithDecree = await contractRepo.GetEmployeeIdsWithContractInRangeAsync(monthStart, monthEnd);
+
+                foreach (var att in attendances)
+                {
+                    if (onlyEmpIds is not null && !onlyEmpIds.Contains(att.EmployeeId)) continue;
+                    if (onlyMissing && _rows.ContainsKey(att.EmployeeId)) continue;
+                    if (!empById.TryGetValue(att.EmployeeId, out var emp)) continue;
+
+                    if (PayrollCalculatorService.ResolveKind(emp.PersonnelType) == PayrollKind.Daily)
+                    {
+                        // بدون حکم در این ماه → محاسبه نشود
+                        if (!idsWithDecree.Contains(emp.Id)) continue;
+                        // بدون رکورد حضور و غیاب ثبت‌شده، یا با جمع روزهای کارکرد صفر → محاسبه نشود
+                        // (اگر رکوردی نباشد، کوئری حضور و غیاب به‌صورت پیش‌فرض ۳۰ روز می‌گذارد؛ این حالت کارکرد واقعی نیست)
+                        if (att.Id <= 0 || att.WorkingDays + att.HolidayDays <= 0) continue;
+                    }
+
+                    try
+                    {
+                        decimal loanInst, advInst, suppInst, carInst;
+
+                        // ✅ اگر این کارمند الآن فیش ذخیره‌شده دارد، اقساطِ همان فیش مبنا قرار می‌گیرد؛
+                        //    چون مانده‌ی وام/بیمه قبلاً با همان فیش کم شده و ذخیره‌ی مجدد اول آن را برمی‌گرداند.
+                        //    (برای اعمال تغییر جدید وام، ابتدا فیش را «حذف» کنید و بعد محاسبه بزنید.)
+                        if (_savedDeductions.TryGetValue(emp.Id, out var sd))
+                        {
+                            loanInst = sd.Loan;
+                            advInst = sd.Advance;
+                            suppInst = sd.Supp;
+                            carInst = sd.Car;
+                        }
+                        else
+                        {
+                            loanInst = SumInstallment(loansByEmp, emp.Id, l => l.MonthlyInstallment, l => l.RemainingAmount);
+                            advInst = SumInstallment(advByEmp, emp.Id, l => l.MonthlyInstallment, l => l.RemainingAmount);
+                            suppInst = SumInstallment(suppByEmp, emp.Id, i => i.MonthlyInstallment, i => i.RemainingAmount);
+                            carInst = SumInstallment(carByEmp, emp.Id, i => i.MonthlyInstallment, i => i.RemainingAmount);
+                        }
+
+                        var result = _calculator.CalculatePayroll(emp, att, settings, loanInst, suppInst, carInst, 0m, taxBrackets, advInst);
+                        result.IsSaved = false;
+                        newResults.Add(result);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogHelper.LogException(ex, $"Payroll_Calc_{emp.PersonnelCode}");
+                    }
+                }
+            }, "در حال محاسبه حقوق...");
+
+            if (!success || IsDisposed) return;
+
+            if (onlyMissing && newResults.Count == 0)
+            {
+                ToastHelper.Show("همه‌ی پرسنل این ماه در لیست هستند؛ فرد جدیدی برای محاسبه پیدا نشد.", false);
                 return;
             }
 
-            int total = dt.Rows.Count;
-            int selected = dt.Rows.Cast<DataRow>().Count(r => r["Selected"] is bool b && b);
-            decimal totalNet = dt.Rows.Cast<DataRow>()
-                .Sum(r => r["NetPay"] == DBNull.Value ? 0m : Convert.ToDecimal(r["NetPay"]));
+            // ردیف‌های جدید جای ردیف قبلی همان کارمند را می‌گیرند؛ بقیه دست‌نخورده می‌مانند
+            foreach (var r in newResults)
+                _rows[r.EmployeeId] = r;
 
-            string prefix = _isLoadedFromDb ? "📂 (از دیتابیس) " : "";
+            RebindGrids();
 
-            lbl.Text = $"{prefix}تعداد: {NumberHelper.FormatThousands(total, usePersianDigits: true)}  |  " +
-                       $"انتخاب‌شده: {NumberHelper.FormatThousands(selected, usePersianDigits: true)}  |  " +
-                       $"جمع خالص: {NumberHelper.FormatThousands(totalNet, usePersianDigits: true)} ریال";
-        }
+            string msg = onlyMissing
+                ? $"حقوق {newResults.Count} نفر که در لیست نبودند محاسبه شد. برای اعمال، «ذخیره» را بزنید."
+                : onlyEmpIds is null
+                ? "محاسبه همه انجام شد. ردیف‌های زرد را بررسی و «ذخیره» کنید."
+                : $"محاسبه مجدد {newResults.Count} نفر انجام شد. برای اعمال، «ذخیره» را بزنید.";
+            ToastHelper.Show(msg, true);
 
-        private static TabKey GetTypeGroup(string? personnelType)
-        {
-            string t = StringHelper.NormalizePersianText(personnelType ?? "ماهانه").Replace(" ", "");
-            if (t == "روزمزد") return TabKey.Daily;
-            if (t == "ساعتی") return TabKey.Hourly;
-            return TabKey.Contractual;
-        }
-
-        private DataTable? GetDt(TabKey key) => key switch
-        {
-            TabKey.Daily => _dtDaily,
-            TabKey.Hourly => _dtHourly,
-            _ => _dtContractual
-        };
-
-        private DataGridView GetDgv(TabKey key) => key switch
-        {
-            TabKey.Daily => dgvDaily,
-            TabKey.Hourly => dgvHourly,
-            _ => dgvContractual
-        };
-
-        private CheckBox GetChkAll(TabKey key) => key switch
-        {
-            TabKey.Daily => chkAllDaily,
-            TabKey.Hourly => chkAllHourly,
-            _ => chkAllContractual
-        };
-
-        private Label GetLblSummary(TabKey key) => key switch
-        {
-            TabKey.Daily => lblSummaryDaily,
-            TabKey.Hourly => lblSummaryHourly,
-            _ => lblSummaryContractual
-        };
-
-        private static decimal GetDecimal(DataRow row, string colName)
-            => row.Table.Columns.Contains(colName) && row[colName] != DBNull.Value ? Convert.ToDecimal(row[colName]) : 0m;
-
-        private static DataTable CreatePayrollDataTable()
-        {
-            var dt = new DataTable();
-            dt.Columns.Add("EmployeeId", typeof(int));
-            dt.Columns.Add("Selected", typeof(bool));
-            dt.Columns.Add("EmployeeName", typeof(string));
-            dt.Columns.Add("PersonnelCode", typeof(string));
-            dt.Columns.Add("PersonnelType", typeof(string));
-
-            dt.Columns.Add("BaseSalary", typeof(decimal));
-            dt.Columns.Add("YearsBonus", typeof(decimal));
-            dt.Columns.Add("HousingAllowance", typeof(decimal));
-            dt.Columns.Add("GroceryAllowance", typeof(decimal));
-            dt.Columns.Add("ChildAllowance", typeof(decimal));
-            dt.Columns.Add("AttractionAllowance", typeof(decimal));
-            dt.Columns.Add("ResponsibilityAllowance", typeof(decimal));
-            dt.Columns.Add("ManagementAllowance", typeof(decimal));
-            dt.Columns.Add("TechnicalAllowance", typeof(decimal));
-            dt.Columns.Add("MarriageAllowance", typeof(decimal));
-            dt.Columns.Add("TransportationAllowance", typeof(decimal));
-            dt.Columns.Add("OtherAllowances", typeof(decimal));
-
-            dt.Columns.Add("OvertimePay", typeof(decimal));
-            dt.Columns.Add("TotalEarnings", typeof(decimal));
-
-            dt.Columns.Add("AbsenceDeduction", typeof(decimal));
-
-            dt.Columns.Add("InsuranceEmployee", typeof(decimal));
-            dt.Columns.Add("InsuranceEmployer", typeof(decimal));
-            dt.Columns.Add("IncomeTax", typeof(decimal));
-            dt.Columns.Add("LoanDeduction", typeof(decimal));
-            dt.Columns.Add("SupplementaryInsuranceDeduction", typeof(decimal));
-            dt.Columns.Add("CarInsuranceDeduction", typeof(decimal));
-            dt.Columns.Add("OtherDeductions", typeof(decimal));
-            dt.Columns.Add("TotalDeductions", typeof(decimal));
-            dt.Columns.Add("NetPay", typeof(decimal));
-
-            return dt;
-        }
-
-        private static object[] BuildRowValues(PayrollResult res)
-        {
-            return new object[]
+            if (overdueAdvances.Count > 0)
             {
-                res.EmployeeId, false, res.EmployeeName, res.PersonnelCode, res.PersonnelType,
-                res.BaseSalary, res.YearsBonus, res.HousingAllowance, res.GroceryAllowance,
-                res.ChildAllowance, res.AttractionAllowance, res.ResponsibilityAllowance,
-                res.ManagementAllowance, res.TechnicalAllowance, res.MarriageAllowance,
-                res.TransportationAllowance, res.OtherAllowances, res.OvertimePay, res.TotalEarnings,
-                res.AbsenceDeduction,
-                res.InsuranceEmployee, res.InsuranceEmployer, res.IncomeTax, res.LoanDeduction,
-                res.SupplementaryInsuranceDeduction, res.CarInsuranceDeduction, res.OtherDeductions,
-                res.TotalDeductions, res.NetPay
-            };
+                string list = string.Join("\n", overdueAdvances.Take(12));
+                if (overdueAdvances.Count > 12) list += $"\n… و {overdueAdvances.Count - 12} مورد دیگر";
+                ModernMessageBox.ShowWarning(
+                    "مساعده‌ی کسرنشده وجود دارد!\n\n" +
+                    "این مساعده‌ها در ماه شروع خودشان کسر نشده‌اند و در حقوق این ماه هم کسر نمی‌شوند:\n\n" + list + "\n\n" +
+                    "اگر می‌خواهید از همین ماه کسر شوند، در «مدیریت وام و مساعده» ماه شروع آن‌ها را عوض کنید و حقوق را دوباره محاسبه کنید.");
+            }
+        }
+        finally { SetBusy(false); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ذخیره
+    // ═══════════════════════════════════════════════════════════════
+    private async Task SaveSafeAsync()
+    {
+        if (IsDisposed || _isBusy) return;
+
+        var toSave = _rows.Values.Where(r => !r.IsSaved).ToList();
+        if (toSave.Count == 0 || _periodYear == 0 || _periodMonth == 0)
+        {
+            ModernMessageBox.ShowWarning("محاسبه‌ی ذخیره‌نشده‌ای وجود ندارد. ابتدا «محاسبه همه» یا «محاسبه مجدد انتخاب‌شده‌ها» را بزنید.");
+            return;
         }
 
-        private static void ApplyResultToRow(DataRow row, PayrollResult res)
+        int year = _periodYear;
+        int month = _periodMonth;
+
+        int overwrite = toSave.Count(r => _savedDeductions.ContainsKey(r.EmployeeId));
+        if (overwrite > 0)
         {
-            row["BaseSalary"] = res.BaseSalary;
-            row["YearsBonus"] = res.YearsBonus;
-            row["HousingAllowance"] = res.HousingAllowance;
-            row["GroceryAllowance"] = res.GroceryAllowance;
-            row["ChildAllowance"] = res.ChildAllowance;
-            row["AttractionAllowance"] = res.AttractionAllowance;
-            row["ResponsibilityAllowance"] = res.ResponsibilityAllowance;
-            row["ManagementAllowance"] = res.ManagementAllowance;
-            row["TechnicalAllowance"] = res.TechnicalAllowance;
-            row["MarriageAllowance"] = res.MarriageAllowance;
-            row["TransportationAllowance"] = res.TransportationAllowance;
-            row["OtherAllowances"] = res.OtherAllowances;
-            row["OvertimePay"] = res.OvertimePay;
-            row["TotalEarnings"] = res.TotalEarnings;
-
-            row["AbsenceDeduction"] = res.AbsenceDeduction;
-
-            row["InsuranceEmployee"] = res.InsuranceEmployee;
-            row["InsuranceEmployer"] = res.InsuranceEmployer;
-            row["IncomeTax"] = res.IncomeTax;
-            row["LoanDeduction"] = res.LoanDeduction;
-            row["SupplementaryInsuranceDeduction"] = res.SupplementaryInsuranceDeduction;
-            row["CarInsuranceDeduction"] = res.CarInsuranceDeduction;
-            row["OtherDeductions"] = res.OtherDeductions;
-            row["TotalDeductions"] = res.TotalDeductions;
-            row["NetPay"] = res.NetPay;
+            if (!ModernMessageBox.AskConfirm(
+                    $"برای {overwrite} نفر از این افراد در {TranslationHelper.GetMonthName(month)} {year} قبلاً فیش ذخیره شده است.\n\n" +
+                    "با ادامه، فیش همین افراد بازنویسی می‌شود و اقساط قبلی آن‌ها اول برگردانده و سپس دوباره کسر می‌شود.\n\nادامه می‌دهید؟",
+                    "بازنویسی فیش‌ها"))
+                return;
         }
 
-        private static void ConfigurePayrollGrid(DataGridView dgv, TabKey key)
+        SetBusy(true);
+        bool success;
+        try
         {
-            if (dgv.Columns["EmployeeId"] != null) dgv.Columns["EmployeeId"].Visible = false;
-
-            if (key == TabKey.Daily || key == TabKey.Hourly)
+            success = await AsyncHelper.RunWithLoading(this, async () =>
             {
-                string[] alwaysZeroColumns =
-                {
-                    "YearsBonus", "HousingAllowance", "GroceryAllowance", "ChildAllowance",
-                    "AttractionAllowance", "ResponsibilityAllowance", "ManagementAllowance",
-                    "TechnicalAllowance", "MarriageAllowance", "TransportationAllowance",
-                    "OtherAllowances"
-                };
-                foreach (var col in alwaysZeroColumns)
-                    if (dgv.Columns[col] != null) dgv.Columns[col].Visible = false;
+                await _payrollRepo.SavePayrollBatchAsync(toSave, year, month);
+            }, "در حال ذخیره در دیتابیس...");
+        }
+        finally { SetBusy(false); }
+
+        if (!success || IsDisposed) return;
+
+        ToastHelper.Show($"حقوق {toSave.Count} نفر با موفقیت ذخیره شد.", true);
+
+        // لیست از دیتابیس دوباره خوانده می‌شود تا همه ردیف‌ها «ذخیره‌شده» و اقساط مبنا به‌روز شود
+        await LoadSavedAsync();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // حذف
+    // ═══════════════════════════════════════════════════════════════
+    private async Task DeleteSelectedAsync()
+    {
+        if (IsDisposed || _isBusy) return;
+
+        var selected = GetSelectedResults();
+        if (selected.Count == 0)
+        {
+            ModernMessageBox.ShowWarning("ابتدا یک یا چند نفر را انتخاب کنید (تیک «انتخاب» یا هایلایت ردیف).");
+            return;
+        }
+
+        var inDb = selected.Where(r => _savedDeductions.ContainsKey(r.EmployeeId)).ToList();
+        int onlyOnScreen = selected.Count - inDb.Count;
+
+        string names = string.Join("، ", selected.Take(5).Select(r => r.EmployeeName));
+        if (selected.Count > 5) names += $" و {selected.Count - 5} نفر دیگر";
+
+        string msg = $"حذف حقوق {selected.Count} نفر:\n{names}\n\n";
+        if (inDb.Count > 0)
+            msg += $"• فیش ذخیره‌شده‌ی {inDb.Count} نفر از دیتابیس حذف می‌شود و اقساط (وام/بیمه) کسرشده‌ی آن‌ها برگردانده می‌شود.\n";
+        if (onlyOnScreen > 0)
+            msg += $"• محاسبه‌ی ذخیره‌نشده‌ی {onlyOnScreen} نفر از لیست کنار گذاشته می‌شود.\n";
+        msg += "\nادامه می‌دهید؟";
+
+        if (!ModernMessageBox.AskConfirm(msg, "حذف حقوق")) return;
+
+        int year = _periodYear;
+        int month = _periodMonth;
+
+        SetBusy(true);
+        try
+        {
+            bool ok = await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                foreach (var r in inDb)
+                    await _payrollRepo.DeletePayrollForEmployeeAsync(r.EmployeeId, year, month);
+            }, "در حال حذف...");
+
+            if (!ok || IsDisposed) return;
+
+            foreach (var r in selected)
+            {
+                _rows.Remove(r.EmployeeId);
+                _savedDeductions.Remove(r.EmployeeId);
             }
 
-            if (key == TabKey.Hourly && dgv.Columns["OvertimePay"] != null)
-                dgv.Columns["OvertimePay"].Visible = false;
-
-            if (dgv.Columns["Selected"] != null)
-            {
-                dgv.Columns["Selected"].HeaderText = "انتخاب";
-                dgv.Columns["Selected"].ReadOnly = false;
-                dgv.Columns["Selected"].DisplayIndex = 0;
-                dgv.Columns["Selected"].AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
-                dgv.Columns["Selected"].Width = 60;
-            }
-
-            void H(string col, string header, bool readOnly = true)
-            {
-                if (dgv.Columns[col] == null) return;
-                dgv.Columns[col].HeaderText = header;
-                dgv.Columns[col].ReadOnly = readOnly;
-            }
-
-            H("EmployeeName", "نام و نام خانوادگی");
-            H("PersonnelCode", "کد پرسنلی");
-            H("PersonnelType", "نوع پرسنلی");
-            H("BaseSalary", "حقوق پایه");
-            H("YearsBonus", "پایه سنوات");
-            H("HousingAllowance", "حق مسکن");
-            H("GroceryAllowance", "حق خواربار");
-            H("ChildAllowance", "حق اولاد");
-            H("AttractionAllowance", "حق جذب");
-            H("ResponsibilityAllowance", "حق مسئولیت");
-            H("ManagementAllowance", "حق مدیریت");
-            H("TechnicalAllowance", "حق فنی");
-            H("MarriageAllowance", "حق تاهل");
-            H("TransportationAllowance", "حق ایاب و ذهاب");
-            H("OtherAllowances", "سایر مزایا");
-            H("OvertimePay", "اضافه‌کاری");
-            H("TotalEarnings", "جمع مزایا");
-
-            H("AbsenceDeduction", "کسر کار");
-
-            H("InsuranceEmployee", "بیمه سهم کارمند");
-
-            if (dgv.Columns["InsuranceEmployer"] != null)
-                dgv.Columns["InsuranceEmployer"].Visible = false;
-
-            H("IncomeTax", "مالیات");
-            H("LoanDeduction", "کسر وام");
-            H("SupplementaryInsuranceDeduction", "بیمه تکمیلی");
-            H("CarInsuranceDeduction", "بیمه خودرو");
-            H("OtherDeductions", "سایر کسورات (قابل ویرایش)", readOnly: false);
-            H("TotalDeductions", "جمع کسورات");
-            H("NetPay", "خالص پرداختی");
-
-            if (dgv.Columns["OtherDeductions"] != null)
-                dgv.Columns["OtherDeductions"].DefaultCellStyle.BackColor = UIHelper.WarmWarningBackground;
+            RebindGrids();
+            ToastHelper.Show($"حقوق {selected.Count} نفر حذف شد. برای محاسبه‌ی دوباره از «محاسبه افراد بدون حقوق» استفاده کنید.", true);
         }
+        finally { SetBusy(false); }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  کنترل‌های اختصاصی ظاهر فرم «پردازش حقوق ماهانه»
+//  (همه با رنگ و فونت ModernTheme؛ هیچ تغییری در کنترل‌های مشترک پروژه لازم نیست)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// <summary>تب‌های قطعه‌ای (Segmented) با شمارنده‌ی نفرات؛ تب اول در راست</summary>
+internal sealed class PayrollSegmentTabs : Control
+{
+    private readonly List<string> _titles = new();
+    private readonly List<int> _counts = new();
+    private int _selected;
+    private int _hot = -1;
+
+    public event EventHandler? SelectedIndexChanged;
+
+    public PayrollSegmentTabs()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+        Height = 44;
+        RightToLeft = RightToLeft.Yes;
+    }
+
+    public void AddTab(string title) { _titles.Add(title); _counts.Add(0); Invalidate(); }
+
+    public void SetCount(int index, int count)
+    {
+        if (index < 0 || index >= _counts.Count) return;
+        _counts[index] = count;
+        Invalidate();
+    }
+
+    public int SelectedIndex
+    {
+        get => _selected;
+        set
+        {
+            if (value < 0 || value >= _titles.Count || value == _selected) return;
+            _selected = value;
+            Invalidate();
+            SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private Rectangle TabRect(int i)
+    {
+        int n = _titles.Count;
+        if (n == 0) return Rectangle.Empty;
+        const int pad = 4;
+        int w = (Width - pad * 2) / n;
+        int x = Width - pad - (i + 1) * w;               // تب اول سمت راست
+        return new Rectangle(x, pad, w, Height - pad * 2);
+    }
+
+    private int HitTest(Point p)
+    {
+        for (int i = 0; i < _titles.Count; i++)
+            if (TabRect(i).Contains(p)) return i;
+        return -1;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        int h = HitTest(e.Location);
+        if (h != _hot) { _hot = h; Invalidate(); }
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        if (_hot != -1) { _hot = -1; Invalidate(); }
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            int h = HitTest(e.Location);
+            if (h >= 0) SelectedIndex = h;
+        }
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(ModernPaint.BehindColor(this));
+
+        var track = new Rectangle(0, 0, Width - 1, Height - 1);
+        if (track.Width < 40 || track.Height < 24) return;
+
+        using (var path = ModernPaint.RoundedRect(track, 12))
+        {
+            using var br = new SolidBrush(ModernTheme.SurfaceMuted);
+            g.FillPath(br, path);
+            using var pen = new Pen(ModernTheme.Border, 1f);
+            g.DrawPath(pen, path);
+        }
+
+        var titleFont = ModernTheme.GetFont(10f, FontStyle.Bold);
+        var badgeFont = ModernTheme.GetFont(8.5f, FontStyle.Bold);
+        const TextFormatFlags measure = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+        const TextFormatFlags draw = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
+                                     TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.RightToLeft;
+
+        for (int i = 0; i < _titles.Count; i++)
+        {
+            var rect = Rectangle.Inflate(TabRect(i), -1, -1);
+            bool sel = i == _selected;
+            bool hot = i == _hot && !sel;
+
+            if (sel)
+            {
+                using var shadow = ModernPaint.RoundedRect(new Rectangle(rect.X, rect.Y + 1, rect.Width, rect.Height), 9);
+                using (var sb = new SolidBrush(Color.FromArgb(28, 60, 50, 45))) g.FillPath(sb, shadow);
+                using var pill = ModernPaint.RoundedRect(rect, 9);
+                using (var br = new SolidBrush(ModernTheme.Surface)) g.FillPath(br, pill);
+                using (var pen = new Pen(ModernTheme.Border, 1f)) g.DrawPath(pen, pill);
+            }
+            else if (hot)
+            {
+                using var pill = ModernPaint.RoundedRect(rect, 9);
+                using var br = new SolidBrush(ModernPaint.Blend(ModernTheme.SurfaceMuted, Color.White, 0.55f));
+                g.FillPath(br, pill);
+            }
+
+            string title = _titles[i];
+            string count = StringHelper.ConvertToPersianDigits(_counts[i].ToString());
+
+            int titleW = TextRenderer.MeasureText(g, title, titleFont, new Size(int.MaxValue, rect.Height), measure).Width;
+            int countW = TextRenderer.MeasureText(g, count, badgeFont, new Size(int.MaxValue, rect.Height), measure).Width;
+            int badgeW = Math.Max(24, countW + 14), badgeH = 20, gap = 8;
+            int total = titleW + gap + badgeW;
+            int startX = rect.X + (rect.Width - total) / 2;
+
+            // عنوان سمت راست، شمارنده سمت چپ آن
+            var titleRect = new Rectangle(startX + badgeW + gap, rect.Y, titleW + 2, rect.Height);
+            TextRenderer.DrawText(g, title, titleFont, titleRect,
+                sel ? ModernTheme.TextStrong : ModernTheme.TextMuted, draw);
+
+            var badge = new Rectangle(startX, rect.Y + (rect.Height - badgeH) / 2, badgeW, badgeH);
+            Color bFill = sel ? ModernTheme.Primary : ModernPaint.Blend(Color.White, ModernTheme.Neutral, 0.20f);
+            Color bText = sel ? Color.White : ModernPaint.Darken(ModernTheme.Neutral, 30);
+            using (var bp = ModernPaint.RoundedRect(badge, 10))
+            using (var bb = new SolidBrush(bFill))
+                g.FillPath(bb, bp);
+            TextRenderer.DrawText(g, count, badgeFont, badge, bText, draw);
+        }
+    }
+}
+
+/// <summary>راهنمای رنگ ردیف‌ها (ذخیره‌شده / ذخیره‌نشده) کنار تب‌ها</summary>
+internal sealed class PayrollLegend : Control
+{
+    public PayrollLegend()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        RightToLeft = RightToLeft.Yes;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(ModernPaint.BehindColor(this));
+
+        var font = ModernTheme.GetFont(9f);
+        var items = new[]
+        {
+            ("ذخیره‌شده", ModernTheme.Success),
+            ("ذخیره‌نشده (زرد)", ModernTheme.Warning)
+        };
+
+        int x = Width - 4;   // از راست شروع می‌شود
+        int cy = Height / 2 - 4;
+        foreach (var (text, color) in items)
+        {
+            int tw = TextRenderer.MeasureText(g, text, font, new Size(int.MaxValue, Height),
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
+
+            var dot = new Rectangle(x - 10, cy - 5, 10, 10);
+            using (var br = new SolidBrush(color)) g.FillEllipse(br, dot);
+
+            var tr = new Rectangle(dot.Left - 6 - tw - 2, 0, tw + 2, Height - 8);
+            TextRenderer.DrawText(g, text, font, tr, ModernTheme.TextMuted,
+                TextFormatFlags.Right | TextFormatFlags.RightToLeft | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+
+            x = tr.Left - 18;
+        }
+    }
+}
+
+/// <summary>نوار پیام نرم (هشدار) با آیکن و متن راست‌چین</summary>
+internal sealed class PayrollInfoBar : Control
+{
+    private string _message = string.Empty;
+
+    public PayrollInfoBar()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        RightToLeft = RightToLeft.Yes;
+    }
+
+    public string Message { get => _message; set { _message = value ?? string.Empty; Invalidate(); } }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(ModernPaint.BehindColor(this));
+
+        var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+        if (rect.Width < 40 || rect.Height < 20 || _message.Length == 0) return;
+
+        Color accent = ModernTheme.Warning;
+        using (var path = ModernPaint.RoundedRect(rect, 10))
+        {
+            using var br = new SolidBrush(ModernPaint.Blend(Color.White, accent, 0.14f));
+            g.FillPath(br, path);
+            using var pen = new Pen(ModernPaint.Blend(Color.White, accent, 0.50f), 1f);
+            g.DrawPath(pen, path);
+        }
+
+        int d = 22;
+        var icon = new Rectangle(rect.Right - 14 - d, rect.Y + (rect.Height - d) / 2, d, d);
+        using (var br = new SolidBrush(accent)) g.FillEllipse(br, icon);
+        TextRenderer.DrawText(g, "!", ModernTheme.GetFont(10f, FontStyle.Bold), icon, Color.White,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+
+        var tr = new Rectangle(rect.X + 14, rect.Y, icon.Left - 10 - rect.X - 14, rect.Height);
+        TextRenderer.DrawText(g, _message, ModernTheme.GetFont(10f, FontStyle.Bold), tr, ModernTheme.WarningText,
+            TextFormatFlags.Right | TextFormatFlags.RightToLeft | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+    }
+}
+
+internal enum PayrollIcon { Calc, Plus, Refresh, Trash, Save, Search, Export }
+
+/// <summary>آیکن‌های خطی ساده که با GDI+ رسم می‌شوند (۳۲×۳۲، رنگ دلخواه)</summary>
+internal static class PayrollIcons
+{
+    public static Bitmap Make(PayrollIcon kind, Color color)
+    {
+        var bmp = new Bitmap(32, 32);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Color.Transparent);
+        using var pen = new Pen(color, 2.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        using var br = new SolidBrush(color);
+
+        switch (kind)
+        {
+            case PayrollIcon.Calc:
+                using (var p = ModernPaint.RoundedRect(new Rectangle(6, 3, 20, 26), 4)) g.DrawPath(pen, p);
+                g.DrawLine(pen, 11, 10, 21, 10);
+                foreach (int y in new[] { 17, 23 })
+                    foreach (int x in new[] { 11, 16, 21 })
+                        g.FillEllipse(br, x - 1.7f, y - 1.7f, 3.4f, 3.4f);
+                break;
+
+            case PayrollIcon.Plus:
+                g.DrawLine(pen, 16, 7, 16, 25);
+                g.DrawLine(pen, 7, 16, 25, 16);
+                break;
+
+            case PayrollIcon.Refresh:
+            {
+                g.DrawArc(pen, new RectangleF(6, 6, 20, 20), 40f, 280f);
+                double a = 320 * Math.PI / 180.0;
+                float cx = 16 + 10 * (float)Math.Cos(a), cy = 16 + 10 * (float)Math.Sin(a);
+                float tx = (float)(-Math.Sin(a)), ty = (float)Math.Cos(a);   // مماس در جهت حرکت
+                float nx = -ty, ny = tx;
+                var tip = new PointF(cx + tx * 6, cy + ty * 6);
+                var b1 = new PointF(cx + nx * 5, cy + ny * 5);
+                var b2 = new PointF(cx - nx * 5, cy - ny * 5);
+                g.FillPolygon(br, new[] { tip, b1, b2 });
+                break;
+            }
+
+            case PayrollIcon.Trash:
+                g.DrawLine(pen, 6, 9, 26, 9);
+                g.DrawLines(pen, new[] { new PointF(12, 9), new PointF(12, 5), new PointF(20, 5), new PointF(20, 9) });
+                g.DrawLines(pen, new[] { new PointF(9, 9), new PointF(10.5f, 27), new PointF(21.5f, 27), new PointF(23, 9) });
+                g.DrawLine(pen, 14, 13, 14, 23);
+                g.DrawLine(pen, 18, 13, 18, 23);
+                break;
+
+            case PayrollIcon.Search:
+                g.DrawEllipse(pen, 5f, 5f, 16f, 16f);
+                g.DrawLine(pen, 19, 19, 27, 27);
+                break;
+
+            case PayrollIcon.Export:
+                g.DrawLine(pen, 16, 5, 16, 19);
+                g.DrawLines(pen, new[] { new PointF(10, 13), new PointF(16, 19), new PointF(22, 13) });
+                g.DrawLines(pen, new[] { new PointF(6, 22), new PointF(6, 27), new PointF(26, 27), new PointF(26, 22) });
+                break;
+
+            case PayrollIcon.Save:
+                using (var p = ModernPaint.RoundedRect(new Rectangle(5, 5, 22, 22), 4)) g.DrawPath(pen, p);
+                g.DrawRectangle(pen, 10, 5, 11, 7);
+                g.DrawRectangle(pen, 9, 18, 14, 9);
+                break;
+        }
+        return bmp;
     }
 }

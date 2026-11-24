@@ -1,527 +1,604 @@
 ﻿using ClosedXML.Excel;
-using Microsoft.Data.SqlClient;
-using SMP.Data;
-using SMP.Helpers;
-using SMP.Models;
+using Smp.Data;
+using Smp.Helpers;
+using Smp.Models;
 using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Drawing;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Data.SqlClient;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class BankFeeForm : Form
 {
-    public class BankFeeForm : Form
+    private readonly string _connectionString;
+    private readonly CashTransactionRepository _transRepo;
+    private readonly BankAccountRepository _bankRepo;
+
+    private ComboBox cmbAccount = null!;
+    private TextBox txtAmount = null!, txtDate = null!, txtDescription = null!;
+    private Button btnSave = null!, btnDownloadTemplate = null!, btnImportExcel = null!;
+    private Button btnEdit = null!, btnDelete = null!, btnCancelEdit = null!;
+    private ModernCard cardInput = null!;
+
+    // حالت ویرایش: رکورد کامل در حال ویرایش (برای حفظ سایر فیلدها مثل جهت، دسته‌بندی و ...)
+    private CashTransaction? _editingEntity;
+    private DataGridView dgvRecent = null!;
+    private ModernStatCard statCount = null!, statTotal = null!;
+
+    public BankFeeForm(string connectionString)
     {
-        private readonly string _connectionString;
-        private readonly int? _transactionId;
-        private readonly CashTransactionRepository _cashRepo;
+        _connectionString = connectionString;
+        _transRepo = new CashTransactionRepository(connectionString);
+        _bankRepo = new BankAccountRepository(connectionString);
 
-        private ComboBox cmbAccount = null!;
-        private TextBox txtAmount = null!, txtDate = null!, txtDescription = null!;
-        private Button btnSave = null!, btnDownloadTemplate = null!, btnImportExcel = null!;
+        BuildUI();
+        this.ApplyStandardHeader("ثبت کارمزد بانکی", new Size(750, 800));
+        ShowInTaskbar = false;
 
-        private DataGridView dgvFees = null!;
-        private Label lblGridTitle = null!;
+        Shown += async (s, e) => await LoadDataAsync();
+    }
 
-        private readonly SemaphoreSlim _actionLock = new(1, 1);
+    private void BuildUI()
+    {
+        // ═══════ ۱. کارت ورودی ═══════
+        cmbAccount = ModernUI.Combo();
+        cmbAccount.DisplayMember = "DisplayTitle";
+        cmbAccount.ValueMember = "Id";
+        txtAmount = new TextBox();
+        SmartInputHelper.EnableSmartAmountTextBox(txtAmount);
+        txtDate = new TextBox { TextAlign = HorizontalAlignment.Center };
+        DateHelper.ApplyDateMask(txtDate);
+        txtDate.Text = DateHelper.ToPersianDate(DateTime.Now);
+        txtDescription = new TextBox { PlaceholderText = "مثلاً: کارمزد انتقال وجه، صدور چک و..." };
 
-        // ✅ FIX: نگه‌داری شناسه و عنوان اصلی حساب
-        private int? _originalAccountId = null;
-        private string? _originalAccountTitle = null;
+        const int rh = 50;
+        var card = new ModernCard("اطلاعات کارمزد", ModernTheme.Brand, 2, rh, rh, rh);
+        cardInput = card;
+        var rowAccount = ModernUI.Row("حساب بانکی", cmbAccount);
+        card.Body.Controls.Add(rowAccount, 0, 0);
+        card.Body.SetColumnSpan(rowAccount, 2);
+        card.Body.Controls.Add(ModernUI.Row("مبلغ (ریال)", txtAmount), 0, 1);
+        card.Body.Controls.Add(ModernUI.Row("تاریخ", txtDate, 80), 1, 1);
+        var rowDesc = ModernUI.Row("توضیحات (بابت)", txtDescription);
+        card.Body.Controls.Add(rowDesc, 0, 2);
+        card.Body.SetColumnSpan(rowDesc, 2);
 
-        // ✅ FIX: ردیابی تغییر حساب توسط کاربر
-        private bool _userChangedAccount = false;
-        private bool _suppressAccountChange = true;
+        // ═══════ ۲. کارت‌های خلاصه ═══════
+        var strip = ModernReport.CreateStatStrip(2, 76);
+        statCount = strip.Add("تعداد کارمزدهای اخیر", ModernTheme.Primary);
+        statTotal = strip.Add("جمع کارمزدهای اخیر", ModernTheme.Danger);
+        statCount.SetCount(0, "کارمزد");
+        statTotal.SetAmount(0, "ریال");
+        strip.Dock = DockStyle.Fill;
 
-        public BankFeeForm(string connectionString, int? transactionId = null)
+        // ═══════ ۳. عنوان لیست + دکمه‌های اکسل ═══════
+        var lblGrid = ModernUI.Caption("لیست کارمزدهای ثبت‌شده اخیر", 11f, true, ModernTheme.TextStrong);
+        lblGrid.Dock = DockStyle.Fill;
+
+        btnDownloadTemplate = ModernButton.Soft("دانلود قالب اکسل", ModernTheme.Secondary, 160, 36);
+        btnDownloadTemplate.Click += BtnDownloadTemplate_Click;
+        btnImportExcel = ModernButton.Soft("ایمپورت از اکسل", ModernTheme.Teal, 150, 36);
+        btnImportExcel.Click += BtnImportExcel_Click;
+
+        var excelFlow = new FlowLayoutPanel
         {
-            _connectionString = connectionString;
-            _transactionId = transactionId;
-            _cashRepo = new CashTransactionRepository(connectionString);
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(0, 6, 0, 0),
+            BackColor = Color.Transparent
+        };
+        excelFlow.Controls.Add(btnDownloadTemplate);
+        excelFlow.Controls.Add(btnImportExcel);
 
-            BuildUI();
-            this.ApplyStandardHeader(_transactionId.HasValue ? "ویرایش کارمزد بانکی" : "ثبت کارمزد بانکی", new Size(700, 850));
-            ShowInTaskbar = false;
+        var toolbar = new BufferedTable
+        {
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+            Margin = Padding.Empty, BackColor = Color.Transparent
+        };
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 340F));
+        toolbar.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        toolbar.Controls.Add(lblGrid, 0, 0);
+        toolbar.Controls.Add(excelFlow, 1, 0);
 
-            ShortcutHelper.ApplyStandardShortcuts(this, btnSave);
+        // ═══════ ۴. جدول کارمزدهای اخیر ═══════
+        dgvRecent = ModernGrid.Create();
+        dgvRecent.AutoGenerateColumns = false;
+        dgvRecent.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        dgvRecent.MultiSelect = true;
+        dgvRecent.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0) _ = StartEditSelectedAsync(); };
+        dgvRecent.KeyDown += async (s, e) =>
+        {
+            if (e.KeyCode == Keys.Delete) { e.Handled = true; await DeleteSelectedAsync(); }
+        };
 
-            // ✅ FIX: ثبت‌نام تغییر حساب کاربر
-            cmbAccount.SelectedIndexChanged += (s, e) =>
+        dgvRecent.Columns.Add(new DataGridViewTextBoxColumn { Name = "TransactionDate", DataPropertyName = "TransactionDate", HeaderText = "تاریخ", FillWeight = 18 });
+        dgvRecent.Columns.Add(new DataGridViewTextBoxColumn { Name = "AccountTitle", DataPropertyName = "AccountTitle", HeaderText = "عنوان حساب", FillWeight = 34 });
+        dgvRecent.Columns.Add(new DataGridViewTextBoxColumn { Name = "Amount", DataPropertyName = "Amount", HeaderText = "مبلغ (ریال)", FillWeight = 20 });
+        dgvRecent.Columns.Add(new DataGridViewTextBoxColumn { Name = "Description", DataPropertyName = "Description", HeaderText = "توضیحات", FillWeight = 28 });
+
+        dgvRecent.UseAiryLook(44);
+        dgvRecent.UseSelectionAccent();
+        dgvRecent.UseTextAlignment("AccountTitle", "Description");
+
+        dgvRecent.CellFormatting += (s, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            string colName = dgvRecent.Columns[e.ColumnIndex].DataPropertyName;
+
+            if (colName == "TransactionDate" && e.Value is DateTime dt)
             {
-                if (!_suppressAccountChange) _userChangedAccount = true;
-            };
-
-            Shown += async (s, e) =>
+                e.Value = DateHelper.ToPersianDate(dt);
+                e.FormattingApplied = true;
+            }
+            else if (colName == "Amount" && e.Value is decimal dec)
             {
-                _suppressAccountChange = true;
+                e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true);
+                e.FormattingApplied = true;
+            }
+        };
+
+        // ═══════ ۵. دکمه ثبت ═══════
+        btnSave = ModernButton.Save("ثبت کارمزد", 200, 40);
+        btnSave.Click += async (s, e) => await SaveFeeAsync();
+        btnCancelEdit = ModernButton.Cancel("انصراف از ویرایش", 150, 40);
+        btnCancelEdit.Visible = false;
+        btnCancelEdit.Click += (s, e) => ExitEditMode(clearInputs: true);
+        btnEdit = ModernButton.Soft("ویرایش انتخاب‌شده", ModernTheme.Primary, 160, 40);
+        btnEdit.Click += async (s, e) => await StartEditSelectedAsync();
+        btnDelete = ModernButton.Soft("حذف انتخاب‌شده‌ها", ModernTheme.Danger, 160, 40);
+        btnDelete.Click += async (s, e) => await DeleteSelectedAsync();
+        var bar = ModernForm.CreateButtonBar(btnSave, btnCancelEdit, btnEdit, btnDelete);
+
+        // ═══════ چیدمان صفحه ═══════
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5,
+            Padding = new Padding(14, 12, 14, 6), BackColor = ModernTheme.Background
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84F));              // کارت‌های خلاصه
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, card.Height + 10)); // کارت ورودی
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52F));              // عنوان + اکسل
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));              // جدول
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64F));              // دکمه ثبت
+        card.Dock = DockStyle.Fill;
+        root.Controls.Add(strip, 0, 0);
+        root.Controls.Add(card, 0, 1);
+        root.Controls.Add(toolbar, 0, 2);
+        root.Controls.Add(ModernReport.WrapGrid(dgvRecent), 0, 3);
+        root.Controls.Add(bar, 0, 4);
+
+        this.Controls.Add(root);
+    }
+
+    private void UpdateStats(DataTable dt)
+    {
+        decimal total = 0;
+        foreach (DataRow r in dt.Rows)
+            if (r["Amount"] != DBNull.Value) total += Convert.ToDecimal(r["Amount"]);
+        statCount.SetCount(dt.Rows.Count, "کارمزد");
+        statTotal.SetAmount(total, "ریال");
+    }
+
+    private async Task LoadDataAsync()
+    {
+        try
+        {
+            // ۱. فیلتر کردن حساب‌ها: فقط حساب‌های بانکی (حذف تنخواه‌ها)
+            var allAccounts = await _bankRepo.GetActiveAsync();
+            var bankAccounts = allAccounts.Where(a => !a.IsCashDesk).ToList();
+
+            cmbAccount.DataSource = bankAccounts;
+
+            // ۲. خواندن مستقیم کارمزدها از دیتابیس (برای نمایش اطلاعات قبلی)
+            // این کوئری هر رکوردی که کلمه کارمزد در نوع تراکنش، دسته بندی یا توضیحات آن باشد را می‌آورد.
+            string sql = @"
+                    SELECT TOP 100 
+                        t.Id, 
+                        t.TransactionType, 
+                        t.Category, 
+                        t.TransactionDate, 
+                        ISNULL(t.AccountTitle, '---') AS AccountTitle, 
+                        t.Amount, 
+                        ISNULL(t.Description, '---') AS Description
+                    FROM CashTransactions t
+                    WHERE t.TransactionType = N'کارمزد' 
+                       OR t.Category = N'کارمزد بانکی' 
+                       OR t.Category = N'کارمزد'
+                       OR t.Description LIKE N'%کارمزد%'
+                    ORDER BY t.TransactionDate DESC, t.Id DESC";
+
+            var dt = await Task.Run(() => DbHelper.ExecuteQuery(_connectionString, sql));
+            dgvRecent.DataSource = dt;
+            UpdateStats(dt);
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "BankFeeForm.LoadDataAsync");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا در بارگذاری اطلاعات:\n" + ex.Message);
+        }
+    }
+
+    private async Task SaveFeeAsync()
+    {
+        if (cmbAccount.SelectedItem is null) { ModernMessageBox.ShowWarning("لطفاً حساب بانکی را انتخاب کنید."); return; }
+        decimal amount = NumberHelper.ParseFormatted(txtAmount.Text);
+        if (amount <= 0) { ModernMessageBox.ShowWarning("مبلغ کارمزد نامعتبر است."); return; }
+        DateTime? date = DateHelper.ParsePersianDate(txtDate.Text);
+        if (date is null) { ModernMessageBox.ShowWarning("تاریخ نامعتبر است."); return; }
+
+        var acc = (CompanyBankAccount)cmbAccount.SelectedItem;
+
+        if (_editingEntity is not null)
+        {
+            await SaveEditAsync(acc, amount, date.Value);
+            return;
+        }
+
+        var trans = new CashTransaction
+        {
+            AccountId = acc.Id,
+            AccountTitle = acc.Title,
+            TransactionDate = date.Value,
+            Amount = amount,
+            Direction = DirectionTypes.Outgoing,
+            TransactionType = "کارمزد",
+            PaymentScope = PaymentScopes.Administrative,
+            Category = "کارمزد بانکی",
+            CostType = "سایر",
+            Description = txtDescription.Text.Trim()
+        };
+
+        bool success = await AsyncHelper.RunWithLoading(this, async () => {
+            await _transRepo.AddAsync(trans);
+        }, "در حال ثبت کارمزد...");
+
+        if (success)
+        {
+            ToastHelper.Show("کارمزد با موفقیت ثبت شد.", true);
+            txtAmount.Clear();
+            txtDescription.Clear();
+            await LoadDataAsync();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ویرایش و حذف
+    // ═══════════════════════════════════════════════════════════════
+    private static string CleanAccountTitle(string title)
+    {
+        if (string.IsNullOrEmpty(title)) return title;
+        const string inactivePrefix = "[غیرفعال] ";
+        if (title.StartsWith(inactivePrefix)) return title.Substring(inactivePrefix.Length);
+        if (title.StartsWith("❌ حساب حذف‌شده")) return "حساب حذف‌شده";
+        return title;
+    }
+
+    // کوئری لیست هر رکوردی که در توضیحات کلمه «کارمزد» دارد را هم می‌آورد؛
+    // ویرایش/حذف فقط برای کارمزدهای واقعی بانکی مجاز است.
+    private static bool IsRealFee(DataRow r)
+    {
+        string type = r["TransactionType"] == DBNull.Value ? "" : r["TransactionType"].ToString() ?? "";
+        string cat = r["Category"] == DBNull.Value ? "" : r["Category"].ToString() ?? "";
+        return type == "کارمزد" || cat == "کارمزد بانکی" || cat == "کارمزد";
+    }
+
+    private List<DataRow> GetSelectedRows()
+    {
+        var list = new List<DataRow>();
+        foreach (DataGridViewRow gr in dgvRecent.SelectedRows)
+            if (gr.DataBoundItem is DataRowView drv) list.Add(drv.Row);
+        return list;
+    }
+
+    private async Task StartEditSelectedAsync()
+    {
+        var rows = GetSelectedRows();
+        if (rows.Count == 0) { ModernMessageBox.ShowWarning("لطفاً یک ردیف را از جدول انتخاب کنید."); return; }
+        if (rows.Count > 1) { ModernMessageBox.ShowWarning("برای ویرایش فقط یک ردیف انتخاب کنید."); return; }
+        if (!IsRealFee(rows[0]))
+        {
+            ModernMessageBox.ShowWarning("این ردیف کارمزد بانکی ثبت‌شده از این فرم نیست (فقط در توضیحات آن کلمه «کارمزد» آمده است).\n\nبرای ویرایش آن از فرم/لیست مربوط به خودش استفاده کنید.");
+            return;
+        }
+
+        try
+        {
+            int id = Convert.ToInt32(rows[0]["Id"]);
+            var entity = await _transRepo.GetByIdAsync(id);
+            if (entity is null)
+            {
+                ModernMessageBox.ShowWarning("این رکورد دیگر وجود ندارد (احتمالاً حذف شده است).");
+                await LoadDataAsync();
+                return;
+            }
+            if (entity.ClientStatementId.HasValue)
+            {
+                ModernMessageBox.ShowWarning("این تراکنش در یک صورت‌حساب ثبت شده و از اینجا قابل ویرایش نیست.");
+                return;
+            }
+
+            if (entity.AccountId.HasValue) await EnsureAccountInComboAsync(entity.AccountId.Value);
+
+            _editingEntity = entity;
+            if (entity.AccountId.HasValue) cmbAccount.SelectedValue = entity.AccountId.Value;
+            txtAmount.Text = NumberHelper.FormatThousands(entity.Amount, usePersianDigits: true);
+            txtDate.Text = DateHelper.ToPersianDate(entity.TransactionDate);
+            txtDescription.Text = entity.Description ?? "";
+
+            btnSave.Text = "ذخیره تغییرات";
+            btnCancelEdit.Visible = true;
+            cardInput.TitleLabel.Text = "ویرایش کارمزد";
+            txtAmount.Focus();
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "BankFeeForm.StartEdit");
+            ModernMessageBox.ShowError("خطا در بارگذاری کارمزد برای ویرایش:\n" + ex.Message);
+        }
+    }
+
+    // اگر حساب رکورد غیرفعال/حذف‌شده باشد در کمبو نیست؛ موقتاً اضافه می‌شود تا حساب اصلی حفظ شود.
+    private async Task EnsureAccountInComboAsync(int accountId)
+    {
+        var current = (cmbAccount.DataSource as IEnumerable<CompanyBankAccount>)?.ToList() ?? new List<CompanyBankAccount>();
+        if (current.Any(a => a.Id == accountId)) return;
+
+        var all = await _bankRepo.GetAllAsync();
+        var stored = all.FirstOrDefault(a => a.Id == accountId);
+        current.Add(stored is not null
+            ? new CompanyBankAccount
+            {
+                Id = stored.Id,
+                Title = $"[غیرفعال] {stored.Title}",
+                BankName = stored.BankName,
+                AccountNumber = stored.AccountNumber,
+                IsActive = false,
+                IsCashDesk = stored.IsCashDesk
+            }
+            : new CompanyBankAccount
+            {
+                Id = accountId,
+                Title = $"❌ حساب حذف‌شده (#{accountId})",
+                BankName = "---",
+                AccountNumber = "---",
+                IsActive = false,
+                IsCashDesk = false
+            });
+        cmbAccount.DataSource = null;
+        cmbAccount.DataSource = current;
+    }
+
+    private void ExitEditMode(bool clearInputs)
+    {
+        _editingEntity = null;
+        btnSave.Text = "ثبت کارمزد";
+        btnCancelEdit.Visible = false;
+        cardInput.TitleLabel.Text = "اطلاعات کارمزد";
+        if (clearInputs)
+        {
+            txtAmount.Clear();
+            txtDescription.Clear();
+            txtDate.Text = DateHelper.ToPersianDate(DateTime.Now);
+        }
+    }
+
+    private async Task SaveEditAsync(CompanyBankAccount acc, decimal amount, DateTime date)
+    {
+        var entity = _editingEntity!;
+        // فقط فیلدهای قابل ویرایش تغییر می‌کنند؛ بقیه (جهت، نوع، دسته‌بندی و ...) همان مقدار قبلی می‌مانند
+        entity.AccountId = acc.Id;
+        entity.AccountTitle = CleanAccountTitle(acc.Title);
+        entity.TransactionDate = date;
+        entity.Amount = amount;
+        entity.Description = txtDescription.Text.Trim();
+
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
+        {
+            await _transRepo.UpdateAsync(entity);
+        }, "در حال ذخیره تغییرات...");
+
+        if (success)
+        {
+            ToastHelper.Show("تغییرات کارمزد با موفقیت ذخیره شد.", true);
+            ExitEditMode(clearInputs: true);
+            await LoadDataAsync();
+        }
+    }
+
+    private async Task DeleteSelectedAsync()
+    {
+        var rows = GetSelectedRows();
+        if (rows.Count == 0) { ModernMessageBox.ShowWarning("لطفاً حداقل یک ردیف را از جدول انتخاب کنید."); return; }
+
+        var valid = rows.Where(IsRealFee).ToList();
+        int skipped = rows.Count - valid.Count;
+        if (valid.Count == 0)
+        {
+            ModernMessageBox.ShowWarning("ردیف(های) انتخاب‌شده کارمزد بانکی ثبت‌شده از این فرم نیستند و از اینجا قابل حذف نیستند.");
+            return;
+        }
+
+        decimal sum = valid.Sum(r => r["Amount"] == DBNull.Value ? 0m : Convert.ToDecimal(r["Amount"]));
+        string msg = valid.Count == 1
+            ? $"آیا از حذف این کارمزد مطمئن هستید؟\n\nمبلغ: {NumberHelper.FormatThousands(sum, usePersianDigits: true)} ریال"
+            : $"آیا از حذف {NumberHelper.FormatThousands(valid.Count, usePersianDigits: true)} کارمزد انتخاب‌شده مطمئن هستید؟\n\nجمع مبلغ: {NumberHelper.FormatThousands(sum, usePersianDigits: true)} ریال";
+        if (skipped > 0) msg += $"\n\n({skipped} ردیف غیرکارمزد از حذف مستثنی شد.)";
+        msg += "\n\nتوجه: مبلغ به موجودی حساب بانکی برگردانده می‌شود.";
+        if (!ModernMessageBox.AskConfirm(msg, "حذف کارمزد")) return;
+
+        var ids = valid.Select(r => Convert.ToInt32(r["Id"])).ToList();
+        try
+        {
+            bool success = await AsyncHelper.RunWithLoading(this, async () =>
+            {
+                await _transRepo.DeleteBatchAsync(ids);
+            }, "در حال حذف کارمزد...");
+
+            if (success && !IsDisposed)
+            {
+                ToastHelper.Show("کارمزد حذف و موجودی حساب اصلاح شد.", true);
+                if (_editingEntity is not null && ids.Contains(_editingEntity.Id)) ExitEditMode(clearInputs: true);
+                await LoadDataAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            LogHelper.LogException(ex, "BankFeeForm.Delete");
+            if (!IsDisposed) ModernMessageBox.ShowError("خطا در حذف:\n" + ex.Message);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // دانلود قالب اکسل استاندارد
+    // ═══════════════════════════════════════════════════════════════
+    private void BtnDownloadTemplate_Click(object? sender, EventArgs e)
+    {
+        using var sfd = new SaveFileDialog { Filter = "Excel Files (*.xlsx)|*.xlsx", FileName = "BankFee_Template.xlsx", Title = "ذخیره قالب اکسل کارمزد" };
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("کارمزدها");
+            ws.RightToLeft = true;
+
+            string[] headers = { "تاریخ (شمسی)", "مبلغ (ریال)", "توضیحات", "عنوان حساب (اختیاری)" };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                var cell = ws.Cell(1, i + 1);
+                cell.Value = headers[i];
+                cell.Style.Font.Bold = true;
+                cell.Style.Fill.BackgroundColor = XLColor.FromArgb(30, 41, 59);
+                cell.Style.Font.FontColor = XLColor.White;
+                cell.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+                cell.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+            }
+
+            // ردیف نمونه
+            ws.Cell(2, 1).Value = DateHelper.ToPersianDate(DateTime.Now);
+            ws.Cell(2, 2).Value = 50000;
+            ws.Cell(2, 3).Value = "کارمزد انتقال وجه";
+            ws.Cell(2, 4).Value = ""; // اگر خالی باشد، حساب انتخاب شده در فرم استفاده می‌شود
+
+            ws.Columns().AdjustToContents();
+            ws.Row(1).Height = 30;
+            wb.SaveAs(sfd.FileName);
+            ToastHelper.Show("قالب اکسل ذخیره شد.", true);
+        }
+        catch (Exception ex) { ModernMessageBox.ShowError("خطا:\n" + ex.Message); }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ایمپورت هوشمند از اکسل
+    // ═══════════════════════════════════════════════════════════════
+    private async void BtnImportExcel_Click(object? sender, EventArgs e)
+    {
+        using var ofd = new OpenFileDialog { Filter = "Excel Files|*.xlsx;*.xls", Title = "انتخاب فایل اکسل کارمزدها" };
+        if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+        List<CashTransaction> transactions = new();
+        List<string> errors = new();
+
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
+        {
+            var allAccounts = await _bankRepo.GetActiveAsync();
+            var accounts = allAccounts.Where(a => !a.IsCashDesk).ToList(); // فقط حساب‌های بانکی
+
+            using var wb = new XLWorkbook(ofd.FileName);
+            var ws = wb.Worksheet(1);
+            var rows = ws.RowsUsed().ToList();
+            if (rows.Count < 2) return;
+
+            // پیدا کردن ایندکس ستون‌ها بر اساس نام هدر (نه شماره ستون)
+            var headers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var cell in rows.First().CellsUsed())
+            {
+                string text = cell.GetString().Trim();
+                if (!string.IsNullOrEmpty(text) && !headers.ContainsKey(text))
+                    headers[text] = cell.Address.ColumnNumber;
+            }
+
+            int dateCol = headers.FirstOrDefault(h => h.Key.Contains("تاریخ")).Value;
+            int amountCol = headers.FirstOrDefault(h => h.Key.Contains("مبلغ")).Value;
+            int descCol = headers.FirstOrDefault(h => h.Key.Contains("توضیحات")).Value;
+            int accCol = headers.FirstOrDefault(h => h.Key.Contains("حساب")).Value;
+
+            int rowNum = 1;
+            foreach (var row in rows.Skip(1))
+            {
+                rowNum++;
                 try
                 {
-                    await LoadAccountsAsync();
-                    await LoadGridDataAsync();
-                    if (_transactionId.HasValue) await LoadTransactionDataAsync(_transactionId.Value);
-                }
-                finally
-                {
-                    _suppressAccountChange = false;
-                }
-            };
-        }
+                    string dateStr = dateCol > 0 ? row.Cell(dateCol).GetString().Trim() : "";
+                    string amountStr = amountCol > 0 ? row.Cell(amountCol).GetString().Trim() : "";
+                    string descStr = descCol > 0 ? row.Cell(descCol).GetString().Trim() : "";
+                    string accStr = accCol > 0 ? row.Cell(accCol).GetString().Trim() : "";
 
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) { try { _actionLock?.Dispose(); } catch { } }
-            base.Dispose(disposing);
-        }
+                    if (string.IsNullOrWhiteSpace(amountStr)) continue;
 
-        private void BuildUI()
-        {
-            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 220F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
+                    DateTime? date = DateHelper.ParsePersianDate(dateStr) ?? DateTime.Today;
+                    decimal amount = NumberHelper.ParseFormatted(amountStr);
 
-            var formLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4, Padding = new Padding(20, 10, 20, 10) };
-            formLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
-            formLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            for (int i = 0; i < 4; i++) formLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50F));
+                    if (amount <= 0) throw new Exception("مبلغ نامعتبر است.");
 
-            cmbAccount = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = "DisplayTitle", ValueMember = "Id", Dock = DockStyle.Fill };
-            txtAmount = new TextBox { Dock = DockStyle.Fill }; SmartInputHelper.EnableSmartAmountTextBox(txtAmount);
-            txtDate = new TextBox { Dock = DockStyle.Fill }; DateHelper.ApplyDateMask(txtDate); txtDate.Text = DateHelper.ToPersianDate(DateTime.Now);
-            txtDescription = new TextBox { PlaceholderText = "مثلاً: کارمزد انتقال وجه، کارمزد صدور چک و...", Dock = DockStyle.Fill };
-
-            UIHelper.AddField(formLayout, "حساب بانکی:", cmbAccount, 0);
-            UIHelper.AddField(formLayout, "مبلغ کارمزد (ریال):", txtAmount, 1);
-            UIHelper.AddField(formLayout, "تاریخ:", txtDate, 2);
-            UIHelper.AddField(formLayout, "توضیحات (بابت):", txtDescription, 3);
-
-            mainLayout.Controls.Add(formLayout, 0, 0);
-
-            var pnlExcel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(20, 10, 20, 0) };
-            btnDownloadTemplate = UIHelper.CreateButton("📥 دانلود قالب اکسل", UIHelper.WarmSecondary, 180, 38);
-            btnDownloadTemplate.Click += BtnDownloadTemplate_Click;
-            btnImportExcel = UIHelper.CreateButton("📤 ایمپورت از اکسل", UIHelper.SectionTeal, 180, 38);
-            btnImportExcel.Click += BtnImportExcel_Click;
-            pnlExcel.Controls.Add(btnImportExcel);
-            pnlExcel.Controls.Add(btnDownloadTemplate);
-            mainLayout.Controls.Add(pnlExcel, 0, 1);
-
-            var pnlGrid = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
-
-            lblGridTitle = new Label
-            {
-                Text = "📋 لیست کارمزدهای ثبت شده اخیر",
-                Dock = DockStyle.Top,
-                Height = 25,
-                Font = UIHelper.PersianFont(11f, FontStyle.Bold),
-                ForeColor = UIHelper.WarmDanger,
-                TextAlign = ContentAlignment.MiddleRight
-            };
-
-            dgvFees = new DataGridView { Dock = DockStyle.Fill };
-            dgvFees.ApplyModernStyle("AccountId", "Category", "CostType", "TransactionType", "Direction", "PaymentScope", "ContractId", "ContractorContractId", "ClientStatementId");
-            dgvFees.AutoGenerateColumns = false;
-
-            dgvFees.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "TransactionDate", HeaderText = "تاریخ", FillWeight = 20 });
-            dgvFees.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "AccountTitle", HeaderText = "حساب بانکی", FillWeight = 30 });
-            dgvFees.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Amount", HeaderText = "مبلغ (ریال)", FillWeight = 20 });
-            dgvFees.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Description", HeaderText = "توضیحات", FillWeight = 30 });
-
-            dgvFees.CellFormatting += (s, e) =>
-            {
-                if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
-                string colName = dgvFees.Columns[e.ColumnIndex].DataPropertyName;
-                if (colName == "TransactionDate" && e.Value is DateTime dt)
-                {
-                    e.Value = DateHelper.ToPersianDate(dt);
-                    e.FormattingApplied = true;
-                }
-                else if (colName == "Amount" && e.Value is decimal dec)
-                {
-                    e.Value = NumberHelper.FormatThousands(dec, usePersianDigits: true);
-                    e.FormattingApplied = true;
-                }
-            };
-
-            pnlGrid.Controls.Add(dgvFees);
-            pnlGrid.Controls.Add(lblGridTitle);
-            mainLayout.Controls.Add(pnlGrid, 0, 2);
-
-            btnSave = UIHelper.CreateButton(_transactionId.HasValue ? "💾 ذخیره تغییرات" : "💾 ثبت کارمزد", UIHelper.WarmDanger, 220, 45);
-            var btnPanel = new Panel { Dock = DockStyle.Fill };
-            btnSave.Anchor = AnchorStyles.None;
-            btnPanel.Controls.Add(btnSave);
-            btnPanel.Resize += (s, e) => { btnSave.Left = (btnPanel.Width - btnSave.Width) / 2; btnSave.Top = (btnPanel.Height - btnSave.Height) / 2; };
-            btnSave.Click += async (s, e) => await SaveSafeAsync();
-
-            mainLayout.Controls.Add(btnPanel, 0, 3);
-            this.Controls.Add(mainLayout);
-        }
-
-        private async Task LoadGridDataAsync()
-        {
-            if (IsDisposed) return;
-            try
-            {
-                string query = @"
-                    SELECT Id, TransactionDate, AccountTitle, Amount, Description 
-                    FROM CashTransactions 
-                    WHERE Category = N'هزینه بانکی'
-                    ORDER BY TransactionDate DESC, Id DESC";
-
-                DataTable dt = null!;
-                await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    dt = await Task.Run(() => DbHelper.ExecuteQuery(_connectionString, query));
-                }, "در حال بارگذاری لیست کارمزدها...");
-
-                if (dt != null && !IsDisposed)
-                {
-                    dgvFees.DataSource = dt;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "BankFeeForm.LoadGridDataAsync");
-            }
-        }
-
-        private async Task LoadAccountsAsync()
-        {
-            if (IsDisposed) return;
-            try
-            {
-                var bankRepo = new BankAccountRepository(_connectionString);
-                var accounts = await bankRepo.GetActiveAsync();
-                if (IsDisposed) return;
-                cmbAccount.DataSource = accounts;
-                if (cmbAccount.Items.Count > 0) cmbAccount.SelectedIndex = 0;
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "BankFeeForm.LoadAccounts");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در بارگذاری حساب‌ها:\n" + ex.Message);
-            }
-        }
-
-        // ✅ FIX: ذخیره‌ی عنوان اصلی و شناسه حساب
-        private async Task LoadTransactionDataAsync(int id)
-        {
-            try
-            {
-                var trans = await _cashRepo.GetByIdAsync(id);
-                if (trans == null || IsDisposed) return;
-
-                _originalAccountId = trans.AccountId;
-                _originalAccountTitle = trans.AccountTitle;
-
-                if (trans.AccountId.HasValue)
-                {
-                    cmbAccount.SelectedValue = trans.AccountId.Value;
-                    bool selected = cmbAccount.SelectedValue != null &&
-                                    Convert.ToInt32(cmbAccount.SelectedValue) == trans.AccountId.Value;
-
-                    if (!selected)
+                    // پیدا کردن حساب
+                    CompanyBankAccount? targetAcc = null;
+                    if (!string.IsNullOrWhiteSpace(accStr))
                     {
-                        var bankRepo = new BankAccountRepository(_connectionString);
-                        var allAccounts = await bankRepo.GetAllAsync();
-                        var storedAcc = allAccounts.FirstOrDefault(a => a.Id == trans.AccountId.Value);
-
-                        CompanyBankAccount displayEntry = storedAcc != null
-                            ? new CompanyBankAccount
-                            {
-                                Id = storedAcc.Id,
-                                Title = $"[غیرفعال] {storedAcc.Title}",
-                                BankName = storedAcc.BankName,
-                                AccountNumber = storedAcc.AccountNumber,
-                                IsActive = false,
-                                IsCashDesk = storedAcc.IsCashDesk
-                            }
-                            : new CompanyBankAccount
-                            {
-                                Id = trans.AccountId.Value,
-                                Title = $"❌ حساب حذف‌شده (#{trans.AccountId.Value})",
-                                BankName = "---",
-                                AccountNumber = "---",
-                                IsActive = false,
-                                IsCashDesk = false
-                            };
-
-                        var currentList = new List<CompanyBankAccount>();
-                        if (cmbAccount.DataSource is IEnumerable<CompanyBankAccount> existing)
-                            currentList.AddRange(existing);
-                        currentList.Add(displayEntry);
-
-                        cmbAccount.DataSource = null;
-                        cmbAccount.DataSource = currentList;
-                        cmbAccount.SelectedValue = displayEntry.Id;
-
-                        ModernMessageBox.ShowWarning(
-                            $"حساب بانکی اصلی این کارمزد {(storedAcc != null ? "غیرفعال شده است" : "از سیستم حذف شده است")}.\n\n" +
-                            "اگر بدون تغییر حساب ذخیره کنید، کارمزد روی همان حساب اصلی باقی می‌ماند.\n" +
-                            "اگر می‌خواهید کارمزد را به حساب دیگری منتقل کنید، از کادر بالا حساب جدید را انتخاب کنید.");
+                        targetAcc = accounts.FirstOrDefault(a => a.Title.Contains(accStr) || a.DisplayTitle.Contains(accStr));
                     }
-                }
 
-                txtAmount.Text = NumberHelper.FormatThousands(trans.Amount, usePersianDigits: true);
-                txtDate.Text = DateHelper.ToPersianDate(trans.TransactionDate);
-                txtDescription.Text = trans.Description;
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "BankFeeForm.LoadTransactionData");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در بارگذاری اطلاعات کارمزد:\n" + ex.Message);
-            }
-        }
-
-        private static string NormalizeAccountTitle(string title)
-        {
-            if (string.IsNullOrEmpty(title)) return title;
-            const string inactivePrefix = "[غیرفعال] ";
-            if (title.StartsWith(inactivePrefix))
-                return title.Substring(inactivePrefix.Length);
-            if (title.StartsWith("❌ حساب حذف‌شده"))
-                return "حساب حذف‌شده";
-            return title;
-        }
-
-        // ✅ FIX: استفاده از _originalAccountId به عنوان fallback + تایید هنگام تغییر حساب
-        private async Task SaveSafeAsync()
-        {
-            if (IsDisposed) return;
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                if (cmbAccount.SelectedValue == null) { ModernMessageBox.ShowWarning("لطفاً یک حساب بانکی را انتخاب کنید."); return; }
-                decimal amount = NumberHelper.ParseFormatted(txtAmount.Text);
-                if (amount <= 0) { ModernMessageBox.ShowWarning("مبلغ کارمزد باید بزرگتر از صفر باشد."); return; }
-                DateTime? date = DateHelper.ParsePersianDate(txtDate.Text);
-                if (date == null) { ModernMessageBox.ShowWarning("تاریخ وارد شده معتبر نیست."); return; }
-
-                var selectedAcc = (CompanyBankAccount)cmbAccount.SelectedItem!;
-                string desc = string.IsNullOrWhiteSpace(txtDescription.Text) ? "کارمزد بانکی" : txtDescription.Text.Trim();
-
-                // ✅ FIX: تصمیم‌گیری درباره حساب مؤثر
-                int effectiveAccountId;
-                string effectiveTitle;
-
-                if (_transactionId.HasValue && !_userChangedAccount && _originalAccountId.HasValue)
-                {
-                    // کاربر حساب را تغییر نداده → روی همان حساب اصلی بمان
-                    effectiveAccountId = _originalAccountId.Value;
-                    effectiveTitle = !string.IsNullOrWhiteSpace(_originalAccountTitle)
-                        ? _originalAccountTitle!
-                        : NormalizeAccountTitle(selectedAcc.Title);
-                }
-                else
-                {
-                    effectiveAccountId = selectedAcc.Id;
-                    effectiveTitle = NormalizeAccountTitle(selectedAcc.Title);
-
-                    // ✅ FIX: اگر در حالت ویرایش است و کاربر واقعاً حساب را عوض کرده، تایید بگیر
-                    if (_transactionId.HasValue && _userChangedAccount && _originalAccountId.HasValue
-                        && effectiveAccountId != _originalAccountId.Value)
+                    // اگر در اکسل حسابی نبود یا پیدا نشد، از حسابی که در بالای فرم انتخاب شده استفاده کن
+                    if (targetAcc is null)
                     {
-                        var originalAccTitle = !string.IsNullOrWhiteSpace(_originalAccountTitle)
-                            ? _originalAccountTitle!
-                            : $"حساب شناسه {_originalAccountId.Value}";
-
-                        var confirmed = ModernMessageBox.AskConfirm(
-                            $"⚠️ شما در حال تغییر حساب بانکی این کارمزد هستید.\n\n" +
-                            $"از: «{originalAccTitle}»\n" +
-                            $"به: «{effectiveTitle}»\n\n" +
-                            $"با تایید:\n" +
-                            $"  • مبلغ قبلی به حساب اصلی بازگردانده می‌شود\n" +
-                            $"  • مبلغ جدید از حساب انتخابی کسر می‌شود\n\n" +
-                            $"آیا ادامه می‌دهید؟",
-                            "تغییر حساب کارمزد");
-
-                        if (!confirmed) return;
+                        targetAcc = cmbAccount.SelectedItem as CompanyBankAccount;
                     }
-                }
 
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    var trans = new CashTransaction
+                    if (targetAcc is null) throw new Exception("حساب بانکی مشخص نشد.");
+
+                    transactions.Add(new CashTransaction
                     {
-                        Id = _transactionId ?? 0,
+                        AccountId = targetAcc.Id,
+                        AccountTitle = targetAcc.Title,
                         TransactionDate = date.Value,
                         Amount = amount,
-                        TransactionType = "نقدی",
                         Direction = DirectionTypes.Outgoing,
-                        AccountId = effectiveAccountId,
-                        AccountTitle = effectiveTitle,
-                        Category = "هزینه بانکی",
-                        CostType = "خدمات",
-                        Description = desc
-                    };
-
-                    if (_transactionId.HasValue)
-                    {
-                        await _cashRepo.UpdateAsync(trans);
-                    }
-                    else
-                    {
-                        await _cashRepo.AddAsync(trans);
-                    }
-                }, "در حال ثبت کارمزد...");
-
-                if (success && !IsDisposed)
+                        TransactionType = "کارمزد",
+                        PaymentScope = PaymentScopes.Administrative,
+                        Category = "کارمزد بانکی",
+                        CostType = "سایر",
+                        Description = string.IsNullOrWhiteSpace(descStr) ? "ایمپورت کارمزد از اکسل" : descStr
+                    });
+                }
+                catch (Exception ex)
                 {
-                    ToastHelper.Show(_transactionId.HasValue ? "تغییرات با موفقیت ذخیره شد." : "کارمزد بانکی با موفقیت ثبت شد.", isSuccess: true);
-
-                    if (!_transactionId.HasValue)
-                    {
-                        txtAmount.Clear();
-                        txtDescription.Clear();
-                        await LoadGridDataAsync();
-                    }
-                    else
-                    {
-                        DialogResult = DialogResult.OK;
-                        Close();
-                    }
+                    errors.Add($"سطر {rowNum}: {ex.Message}");
                 }
             }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "BankFeeForm.SaveSafeAsync");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در ثبت:\n" + ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
-        }
 
-        private void BtnDownloadTemplate_Click(object? sender, EventArgs e)
+            // ثبت در دیتابیس
+            if (transactions.Any())
+            {
+                await _transRepo.BulkInsertAsync(transactions);
+            }
+        }, "در حال ایمپورت کارمزدها...");
+
+        if (success)
         {
-            using var sfd = new SaveFileDialog
-            {
-                Filter = "Excel Files (*.xlsx)|*.xlsx",
-                FileName = "BankFee_Import_Template.xlsx",
-                Title = "ذخیره قالب اکسل کارمزد بانکی"
-            };
-            if (sfd.ShowDialog(this) != DialogResult.OK) return;
+            string msg = $"✅ تعداد {transactions.Count} کارمزد با موفقیت ثبت شد.";
+            if (errors.Count > 0) msg += $"\n\n⚠️ {errors.Count} خطا رخ داد:\n" + string.Join("\n", errors.Take(5));
 
-            try
-            {
-                using var workbook = new XLWorkbook();
-                var ws = workbook.Worksheets.Add("کارمزد بانکی");
-                ws.RightToLeft = true;
+            if (errors.Count > 0) ModernMessageBox.ShowWarning(msg, "نتیجه ایمپورت");
+            else ModernMessageBox.ShowInfo(msg, "نتیجه ایمپورت");
 
-                string[] headers = { "تاریخ (شمسی)", "مبلغ (ریال)", "توضیحات" };
-                for (int i = 0; i < headers.Length; i++)
-                {
-                    var cell = ws.Cell(1, i + 1);
-                    cell.Value = headers[i];
-                    cell.Style.Font.Bold = true;
-                    cell.Style.Fill.BackgroundColor = XLColor.FromArgb(30, 41, 59);
-                    cell.Style.Font.FontColor = XLColor.White;
-                    cell.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
-                }
-
-                ws.Cell(2, 1).Value = DateHelper.ToPersianDate(DateTime.Now);
-                ws.Cell(2, 2).Value = 50000;
-                ws.Cell(2, 3).Value = "کارمزد انتقال وجه";
-
-                ws.Columns().AdjustToContents();
-                workbook.SaveAs(sfd.FileName);
-                ToastHelper.Show("قالب اکسل ساخته شد.", true);
-            }
-            catch (Exception ex)
-            {
-                ModernMessageBox.ShowError("خطا در ساخت قالب:\n" + ex.Message);
-            }
-        }
-
-        private async void BtnImportExcel_Click(object? sender, EventArgs e)
-        {
-            if (cmbAccount.SelectedValue == null) { ModernMessageBox.ShowWarning("لطفاً ابتدا حساب بانکی را انتخاب کنید."); return; }
-
-            using var ofd = new OpenFileDialog { Filter = "Excel Files|*.xlsx;*.xls", Title = "انتخاب فایل اکسل کارمزدها" };
-            if (ofd.ShowDialog(this) != DialogResult.OK) return;
-
-            if (!await _actionLock.WaitAsync(0)) return;
-
-            try
-            {
-                var selectedAcc = (CompanyBankAccount)cmbAccount.SelectedItem!;
-                string cleanAccountTitle = NormalizeAccountTitle(selectedAcc.Title);
-                int successCount = 0;
-                List<string> errors = new();
-
-                bool success = await AsyncHelper.RunWithLoading(this, async () =>
-                {
-                    using var workbook = new XLWorkbook(ofd.FileName);
-                    var ws = workbook.Worksheet(1);
-                    var rows = ws.RowsUsed().Skip(1);
-
-                    foreach (var row in rows)
-                    {
-                        try
-                        {
-                            string dateStr = row.Cell(1).GetFormattedString().Trim();
-                            string amountStr = row.Cell(2).GetFormattedString().Trim();
-                            string desc = row.Cell(3).GetFormattedString().Trim();
-
-                            if (string.IsNullOrWhiteSpace(dateStr) && string.IsNullOrWhiteSpace(amountStr)) continue;
-
-                            DateTime? date = DateHelper.ParsePersianDate(dateStr);
-                            if (date == null) throw new Exception($"تاریخ «{dateStr}» معتبر نیست.");
-
-                            decimal amount = NumberHelper.ParseFormatted(amountStr);
-                            if (amount <= 0) throw new Exception("مبلغ نامعتبر است.");
-
-                            var trans = new CashTransaction
-                            {
-                                TransactionDate = date.Value,
-                                Amount = amount,
-                                TransactionType = "نقدی",
-                                Direction = DirectionTypes.Outgoing,
-                                AccountId = selectedAcc.Id,
-                                AccountTitle = cleanAccountTitle,
-                                Category = "هزینه بانکی",
-                                CostType = "خدمات",
-                                Description = string.IsNullOrWhiteSpace(desc) ? "کارمزد بانکی" : desc
-                            };
-
-                            await _cashRepo.AddAsync(trans);
-                            successCount++;
-                        }
-                        catch (Exception ex)
-                        {
-                            errors.Add($"سطر {row.RowNumber()}: {ex.Message}");
-                        }
-                    }
-                }, "در حال ایمپورت از اکسل...");
-
-                if (success && !IsDisposed)
-                {
-                    string msg = $"✅ تعداد {successCount} ردیف کارمزد ثبت شد.";
-                    if (errors.Count > 0)
-                    {
-                        msg += $"\n\n⚠️ {errors.Count} خطا:\n" + string.Join("\n", errors.Take(5));
-                    }
-                    ModernMessageBox.ShowInfo(msg, "نتیجه ایمپورت");
-                    await LoadGridDataAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.LogException(ex, "BankFeeForm.ImportExcel");
-                if (!IsDisposed) ModernMessageBox.ShowError("خطا در ایمپورت:\n" + ex.Message);
-            }
-            finally
-            {
-                try { _actionLock.Release(); } catch { }
-            }
+            await LoadDataAsync();
         }
     }
 }

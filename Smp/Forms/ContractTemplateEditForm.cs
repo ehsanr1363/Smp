@@ -1,6 +1,6 @@
 ﻿using ClosedXML.Excel;
-using SMP.Data;
-using SMP.Helpers;
+using Smp.Data;
+using Smp.Helpers;
 using System;
 using System.Drawing;
 using System.IO;
@@ -9,172 +9,172 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace SMP.Forms
+namespace Smp.Forms;
+
+public class ContractTemplateEditForm : Form
 {
-    public class ContractTemplateEditForm : Form
+    private readonly ContractTemplateRepository _repo;
+    private RichTextBox txtContent = null!;
+
+    public ContractTemplateEditForm(string connectionString)
     {
-        private readonly ContractTemplateRepository _repo;
-        private RichTextBox txtContent = null!;
+        _repo = new ContractTemplateRepository(connectionString);
+        BuildUI();
+        this.ApplyStandardHeader("ویرایش متن قرارداد پرسنلی", new Size(900, 700));
 
-        public ContractTemplateEditForm(string connectionString)
+        Shown += async (s, e) => await LoadTemplateAsync();
+    }
+
+    private void BuildUI()
+    {
+        var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(10) };
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 65F));
+
+        var lblHint = new Label
         {
-            _repo = new ContractTemplateRepository(connectionString);
-            BuildUI();
-            this.ApplyStandardHeader("ویرایش متن قرارداد پرسنلی", new Size(900, 700));
+            Text = "💡 راهنما: می‌توانید متن را از اکسل کپی کرده و اینجا پیست (Ctrl+V) کنید یا از دکمه «ایمپورت از اکسل» استفاده کنید.\n" +
+                   "کدهای خودکار: [نام کارمند] - [کد ملی] - [تاریخ تولد] - [شماره شناسنامه] - [تاریخ شروع] - [تاریخ پایان]\n" +
+                   "[حقوق پایه] - [پایه سنوات] - [حق مسکن] - [حق خواربار] - [حق اولاد] - [سایر مزایا] - [جمع کل]",
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            TextAlign = ContentAlignment.MiddleRight,
+            Font = ModernTheme.GetFont(9.5f, FontStyle.Bold),
+            ForeColor = ModernTheme.Primary,
+            BackColor = Color.FromArgb(240, 248, 255),
+            BorderStyle = BorderStyle.FixedSingle,
+            Padding = new Padding(10)
+        };
 
-            Shown += async (s, e) => await LoadTemplateAsync();
-        }
-
-        private void BuildUI()
+        txtContent = new RichTextBox
         {
-            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(10) };
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 65F));
+            Dock = DockStyle.Fill,
+            Font = ModernTheme.GetFont(12f),
+            RightToLeft = RightToLeft.Yes,
+            BackColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            ScrollBars = RichTextBoxScrollBars.Vertical,
+            WordWrap = true
+        };
 
-            var lblHint = new Label
+        // جلوگیری از پیست شدن فرمت‌های پیچیده اکسل (فقط متن خالص پیست شود)
+        txtContent.KeyDown += (s, e) =>
+        {
+            if (e.Control && e.KeyCode == Keys.V)
             {
-                Text = "💡 راهنما: می‌توانید متن را از اکسل کپی کرده و اینجا پیست (Ctrl+V) کنید یا از دکمه «ایمپورت از اکسل» استفاده کنید.\n" +
-                       "کدهای خودکار: [نام کارمند] - [کد ملی] - [تاریخ تولد] - [شماره شناسنامه] - [تاریخ شروع] - [تاریخ پایان]\n" +
-                       "[حقوق پایه] - [پایه سنوات] - [حق مسکن] - [حق خواربار] - [حق اولاد] - [سایر مزایا] - [جمع کل]",
-                Dock = DockStyle.Fill,
-                AutoSize = false,
-                TextAlign = ContentAlignment.MiddleRight,
-                Font = UIHelper.PersianFont(9.5f, FontStyle.Bold),
-                ForeColor = UIHelper.SectionBlue,
-                BackColor = Color.FromArgb(240, 248, 255),
-                BorderStyle = BorderStyle.FixedSingle,
-                Padding = new Padding(10)
-            };
-
-            txtContent = new RichTextBox
-            {
-                Dock = DockStyle.Fill,
-                Font = UIHelper.PersianFont(12f),
-                RightToLeft = RightToLeft.Yes,
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle,
-                ScrollBars = RichTextBoxScrollBars.Vertical,
-                WordWrap = true
-            };
-
-            // جلوگیری از پیست شدن فرمت‌های پیچیده اکسل (فقط متن خالص پیست شود)
-            txtContent.KeyDown += (s, e) =>
-            {
-                if (e.Control && e.KeyCode == Keys.V)
+                e.Handled = true;
+                if (Clipboard.ContainsText())
                 {
-                    e.Handled = true;
-                    if (Clipboard.ContainsText())
-                    {
-                        txtContent.SelectedText = Clipboard.GetText();
-                    }
+                    txtContent.SelectedText = Clipboard.GetText();
                 }
-            };
+            }
+        };
 
-            var pnlBottom = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 10, 0, 0) };
+        var pnlBottom = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 10, 0, 0) };
 
-            // 👈 دکمه جدید ایمپورت از اکسل اضافه شد
-            var btnImport = UIHelper.CreateButton("📥 ایمپورت از اکسل", UIHelper.SectionTeal, 160, 45);
-            btnImport.Click += BtnImportExcel_Click;
+        // 👈 دکمه جدید ایمپورت از اکسل اضافه شد
+        var btnImport = ModernButton.Create("📥 ایمپورت از اکسل", ModernTheme.Teal, 160, 45);
+        btnImport.Click += BtnImportExcel_Click;
 
-            var btnSave = UIHelper.CreateButton("💾 ذخیره متن قرارداد", UIHelper.ActionGreen, 200, 45);
-            btnSave.Click += async (s, e) => await SaveTemplateAsync();
+        var btnSave = ModernButton.Create("💾 ذخیره متن قرارداد", ModernTheme.Success, 200, 45);
+        btnSave.Click += async (s, e) => await SaveTemplateAsync();
 
-            pnlBottom.Controls.Add(btnSave);
-            pnlBottom.Controls.Add(btnImport);
+        pnlBottom.Controls.Add(btnSave);
+        pnlBottom.Controls.Add(btnImport);
 
-            var wrapper = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
-            wrapper.RowStyles.Add(new RowStyle(SizeType.Absolute, 75F));
-            wrapper.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        var wrapper = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        wrapper.RowStyles.Add(new RowStyle(SizeType.Absolute, 75F));
+        wrapper.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
-            wrapper.Controls.Add(lblHint, 0, 0);
-            wrapper.Controls.Add(txtContent, 0, 1);
+        wrapper.Controls.Add(lblHint, 0, 0);
+        wrapper.Controls.Add(txtContent, 0, 1);
 
-            mainLayout.Controls.Add(wrapper, 0, 0);
-            mainLayout.Controls.Add(pnlBottom, 0, 1);
+        mainLayout.Controls.Add(wrapper, 0, 0);
+        mainLayout.Controls.Add(pnlBottom, 0, 1);
 
-            this.Controls.Add(mainLayout);
-        }
+        this.Controls.Add(mainLayout);
+    }
 
-        // 👈 متد مربوط به خواندن فایل اکسل
-        private void BtnImportExcel_Click(object? sender, EventArgs e)
+    // 👈 متد مربوط به خواندن فایل اکسل
+    private void BtnImportExcel_Click(object? sender, EventArgs e)
+    {
+        using var ofd = new OpenFileDialog
         {
-            using var ofd = new OpenFileDialog
+            Filter = "Excel Files|*.xlsx;*.xls",
+            Title = "انتخاب فایل اکسل متن قرارداد"
+        };
+
+        if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            var sb = new StringBuilder();
+
+            // استفاده از FileStream برای جلوگیری از خطای قفل بودن فایل در اکسل
+            using var stream = new FileStream(ofd.FileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var workbook = new XLWorkbook(stream);
+            var worksheet = workbook.Worksheet(1);
+            var rows = worksheet.RowsUsed();
+
+            foreach (var row in rows)
             {
-                Filter = "Excel Files|*.xlsx;*.xls",
-                Title = "انتخاب فایل اکسل متن قرارداد"
-            };
+                // خواندن متن تمام سلول‌های پرشده در این ردیف
+                var cellValues = row.CellsUsed()
+                    .Select(c => c.GetFormattedString().Trim())
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .ToList();
 
-            if (ofd.ShowDialog(this) != DialogResult.OK) return;
-
-            try
-            {
-                var sb = new StringBuilder();
-
-                // استفاده از FileStream برای جلوگیری از خطای قفل بودن فایل در اکسل
-                using var stream = new FileStream(ofd.FileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var workbook = new XLWorkbook(stream);
-                var worksheet = workbook.Worksheet(1);
-                var rows = worksheet.RowsUsed();
-
-                foreach (var row in rows)
+                if (cellValues.Any())
                 {
-                    // خواندن متن تمام سلول‌های پرشده در این ردیف
-                    var cellValues = row.CellsUsed()
-                        .Select(c => c.GetFormattedString().Trim())
-                        .Where(s => !string.IsNullOrWhiteSpace(s))
-                        .ToList();
-
-                    if (cellValues.Any())
-                    {
-                        // چسباندن متن سلول‌ها با یک فاصله یا Tab
-                        sb.AppendLine(string.Join("\t", cellValues));
-                    }
-                    else
-                    {
-                        sb.AppendLine(); // اگر ردیف خالی بود، خط خالی بگذار
-                    }
-                }
-
-                if (sb.Length > 0)
-                {
-                    txtContent.Text = sb.ToString();
-                    ToastHelper.Show("متن قرارداد با موفقیت از اکسل خوانده شد.", true);
+                    // چسباندن متن سلول‌ها با یک فاصله یا Tab
+                    sb.AppendLine(string.Join("\t", cellValues));
                 }
                 else
                 {
-                    ModernMessageBox.ShowWarning("فایل اکسل انتخاب شده خالی است.");
+                    sb.AppendLine(); // اگر ردیف خالی بود، خط خالی بگذار
                 }
             }
-            catch (IOException)
+
+            if (sb.Length > 0)
             {
-                ModernMessageBox.ShowWarning("فایل اکسل در حال حاضر باز است. لطفاً آن را ببندید و دوباره تلاش کنید.");
+                txtContent.Text = sb.ToString();
+                ToastHelper.Show("متن قرارداد با موفقیت از اکسل خوانده شد.", true);
             }
-            catch (Exception ex)
+            else
             {
-                LogHelper.LogException(ex, "ContractTemplateEditForm.ImportExcel");
-                ModernMessageBox.ShowError("خطا در خواندن فایل اکسل:\n" + ex.Message);
+                ModernMessageBox.ShowWarning("فایل اکسل انتخاب شده خالی است.");
             }
         }
-
-        private async Task LoadTemplateAsync()
+        catch (IOException)
         {
-            bool success = await AsyncHelper.RunWithLoading(this, async () =>
-            {
-                var content = await _repo.GetActiveTemplateContentAsync();
-                if (!string.IsNullOrWhiteSpace(content))
-                {
-                    txtContent.Text = content;
-                }
-                else
-                {
-                    txtContent.Text = GetDefaultTemplateText();
-                }
-            }, "در حال بارگذاری متن قرارداد...");
+            ModernMessageBox.ShowWarning("فایل اکسل در حال حاضر باز است. لطفاً آن را ببندید و دوباره تلاش کنید.");
         }
-
-        private string GetDefaultTemplateText()
+        catch (Exception ex)
         {
-            return @"بسمه تعالی
+            LogHelper.LogException(ex, "ContractTemplateEditForm.ImportExcel");
+            ModernMessageBox.ShowError("خطا در خواندن فایل اکسل:\n" + ex.Message);
+        }
+    }
+
+    private async Task LoadTemplateAsync()
+    {
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
+        {
+            var content = await _repo.GetActiveTemplateContentAsync();
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                txtContent.Text = content;
+            }
+            else
+            {
+                txtContent.Text = GetDefaultTemplateText();
+            }
+        }, "در حال بارگذاری متن قرارداد...");
+    }
+
+    private string GetDefaultTemplateText()
+    {
+        return @"بسمه تعالی
 قرارداد کار (مدت موقت)
 
 این قرارداد بین شرکت (کارفرما) و [نام کارمند] فرزند .......... به شماره شناسنامه [شماره شناسنامه] متولد [تاریخ تولد] به کد ملی [کد ملی] (کارپذیر) منعقد می‌گردد.
@@ -201,26 +201,25 @@ namespace SMP.Forms
 
 مهر و امضای کارفرما:
 مهر و امضای کارپذیر:";
+    }
+
+    private async Task SaveTemplateAsync()
+    {
+        if (string.IsNullOrWhiteSpace(txtContent.Text))
+        {
+            ModernMessageBox.ShowWarning("متن قرارداد نمی‌تواند خالی باشد.");
+            return;
         }
 
-        private async Task SaveTemplateAsync()
+        bool success = await AsyncHelper.RunWithLoading(this, async () =>
         {
-            if (string.IsNullOrWhiteSpace(txtContent.Text))
-            {
-                ModernMessageBox.ShowWarning("متن قرارداد نمی‌تواند خالی باشد.");
-                return;
-            }
+            await _repo.SaveTemplateAsync(txtContent.Text);
+        }, "در حال ذخیره متن قرارداد...");
 
-            bool success = await AsyncHelper.RunWithLoading(this, async () =>
-            {
-                await _repo.SaveTemplateAsync(txtContent.Text);
-            }, "در حال ذخیره متن قرارداد...");
-
-            if (success)
-            {
-                ToastHelper.Show("متن قرارداد با موفقیت ذخیره شد.", true);
-                this.Close();
-            }
+        if (success)
+        {
+            ToastHelper.Show("متن قرارداد با موفقیت ذخیره شد.", true);
+            this.Close();
         }
     }
 }

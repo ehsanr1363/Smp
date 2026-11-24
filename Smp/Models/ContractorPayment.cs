@@ -1,23 +1,22 @@
 ﻿using System;
 
-namespace SMP.Models
+namespace Smp.Models;
+
+public class ContractorPayment
 {
-    public class ContractorPayment
-    {
-        public int Id { get; set; }
-        public int ContractId { get; set; }
+    public int Id { get; set; }
+    public int ContractId { get; set; }
 
-        // ✅ NEW: شناسه قرارداد کارفرما (برای گزارش‌گیری‌های یکپارچه)
-        public int? ClientContractId { get; set; }
+    // ✅ NEW: شناسه قرارداد کارفرما (برای گزارش‌گیری‌های یکپارچه)
+    public int? ClientContractId { get; set; }
 
-        public DateTime PaymentDate { get; set; }
-        public decimal Amount { get; set; }
-        public string PaymentType { get; set; } = "";
+    public DateTime PaymentDate { get; set; }
+    public decimal Amount { get; set; }
+    public string PaymentType { get; set; } = "";
 
-        // ✅ NEW: ماهیت هزینه (خرید کالا / خرید خدمات)
-        public string? CostType { get; set; }
+    // ✅ NEW: ماهیت هزینه (خرید کالا / خرید خدمات)
+    public string? CostType { get; set; }
 
-        public string Description { get; set; } = "";
-        public DateTime CreatedAt { get; set; } = DateTime.Now;
-    }
+    public string Description { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.Now;
 }

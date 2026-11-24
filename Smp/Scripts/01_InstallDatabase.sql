@@ -1,5 +1,5 @@
 ﻿-- ============================================================
--- SMP — Installation Script
+-- Smp — Installation Script
 -- اجرای این اسکریپت قبل از اولین اجرای برنامه الزامی است.
 -- این اسکریپت idempotent است (چند بار اجرا شود مشکلی ایجاد نمی‌کند)
 -- ============================================================
@@ -17,8 +17,8 @@ GO
 -- ============================================================
 -- 1. Departments
 -- ============================================================
-IF OBJECT_ID('Departments', 'U') IS NULL
-CREATE TABLE Departments (
+IF OBJECT_ID('dbo.Departments', 'U') IS NULL
+CREATE TABLE dbo.Departments (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Code NVARCHAR(50) NULL,
     Name NVARCHAR(255) NOT NULL,
@@ -29,8 +29,8 @@ GO
 -- ============================================================
 -- 2. Companies
 -- ============================================================
-IF OBJECT_ID('Companies', 'U') IS NULL
-CREATE TABLE Companies (
+IF OBJECT_ID('dbo.Companies', 'U') IS NULL
+CREATE TABLE dbo.Companies (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Name NVARCHAR(255) NOT NULL,
     Address NVARCHAR(MAX) NULL,
@@ -46,8 +46,8 @@ GO
 -- ============================================================
 -- 3. LookupItems
 -- ============================================================
-IF OBJECT_ID('LookupItems', 'U') IS NULL
-CREATE TABLE LookupItems (
+IF OBJECT_ID('dbo.LookupItems', 'U') IS NULL
+CREATE TABLE dbo.LookupItems (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Category NVARCHAR(100) NOT NULL,
     Value NVARCHAR(255) NOT NULL
@@ -57,8 +57,8 @@ GO
 -- ============================================================
 -- 4. Parties
 -- ============================================================
-IF OBJECT_ID('Parties', 'U') IS NULL
-CREATE TABLE Parties (
+IF OBJECT_ID('dbo.Parties', 'U') IS NULL
+CREATE TABLE dbo.Parties (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     PartyType NVARCHAR(50) NOT NULL,
     IsForeign INT DEFAULT 0,
@@ -79,8 +79,8 @@ GO
 -- ============================================================
 -- 5. Employees — تاریخ‌ها با DATETIME
 -- ============================================================
-IF OBJECT_ID('Employees', 'U') IS NULL
-CREATE TABLE Employees (
+IF OBJECT_ID('dbo.Employees', 'U') IS NULL
+CREATE TABLE dbo.Employees (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     PersonnelCode NVARCHAR(50) NULL,
     FirstName NVARCHAR(100) NOT NULL,
@@ -136,8 +136,8 @@ GO
 -- ============================================================
 -- 6. Users
 -- ============================================================
-IF OBJECT_ID('Users', 'U') IS NULL
-CREATE TABLE Users (
+IF OBJECT_ID('dbo.Users', 'U') IS NULL
+CREATE TABLE dbo.Users (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NULL,
     Username NVARCHAR(100) NOT NULL UNIQUE,
@@ -146,15 +146,16 @@ CREATE TABLE Users (
     IsActive INT DEFAULT 1,
     LastLogin DATETIME NULL,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id) ON DELETE SET NULL
+    MustChangePassword BIT NOT NULL DEFAULT 0,
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id) ON DELETE SET NULL
 );
 GO
 
 -- ============================================================
 -- 7. Dependents
 -- ============================================================
-IF OBJECT_ID('Dependents', 'U') IS NULL
-CREATE TABLE Dependents (
+IF OBJECT_ID('dbo.Dependents', 'U') IS NULL
+CREATE TABLE dbo.Dependents (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     FirstName NVARCHAR(100) NOT NULL,
@@ -167,15 +168,15 @@ CREATE TABLE Dependents (
     BirthPlace NVARCHAR(100) NULL,
     Relation NVARCHAR(50) NULL,
     HasSupplementaryInsurance INT DEFAULT 0,
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id) ON DELETE CASCADE
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id) ON DELETE CASCADE
 );
 GO
 
 -- ============================================================
 -- 8. Banks
 -- ============================================================
-IF OBJECT_ID('Banks', 'U') IS NULL
-CREATE TABLE Banks (
+IF OBJECT_ID('dbo.Banks', 'U') IS NULL
+CREATE TABLE dbo.Banks (
     BankCode NVARCHAR(50) PRIMARY KEY,
     BankName NVARCHAR(150) NOT NULL
 );
@@ -184,23 +185,23 @@ GO
 -- ============================================================
 -- 9. EmployeeBankAccounts
 -- ============================================================
-IF OBJECT_ID('EmployeeBankAccounts', 'U') IS NULL
-CREATE TABLE EmployeeBankAccounts (
+IF OBJECT_ID('dbo.EmployeeBankAccounts', 'U') IS NULL
+CREATE TABLE dbo.EmployeeBankAccounts (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     AccountNumber NVARCHAR(100) NULL,
     ShebaNumber NVARCHAR(100) NULL,
     BankCode NVARCHAR(50) NULL,
     IsMainAccount INT DEFAULT 0,
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id) ON DELETE CASCADE
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id) ON DELETE CASCADE
 );
 GO
 
 -- ============================================================
 -- 10. ClientContracts
 -- ============================================================
-IF OBJECT_ID('ClientContracts', 'U') IS NULL
-CREATE TABLE ClientContracts (
+IF OBJECT_ID('dbo.ClientContracts', 'U') IS NULL
+CREATE TABLE dbo.ClientContracts (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     PartyId INT NOT NULL,
     ContractNumber NVARCHAR(100) NULL,
@@ -212,15 +213,15 @@ CREATE TABLE ClientContracts (
     TerminationDate DATETIME NULL,
     CreatedAt DATETIME DEFAULT GETDATE(),
     Status NVARCHAR(50) DEFAULT N'فعال',
-    FOREIGN KEY (PartyId) REFERENCES Parties(Id)
+    FOREIGN KEY (PartyId) REFERENCES dbo.Parties(Id)
 );
 GO
 
 -- ============================================================
 -- 11. ContractorContracts
 -- ============================================================
-IF OBJECT_ID('ContractorContracts', 'U') IS NULL
-CREATE TABLE ContractorContracts (
+IF OBJECT_ID('dbo.ContractorContracts', 'U') IS NULL
+CREATE TABLE dbo.ContractorContracts (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     PartyId INT NOT NULL,
     ClientContractId INT NULL,
@@ -240,16 +241,16 @@ CREATE TABLE ContractorContracts (
     VatPercentage DECIMAL(5,2) DEFAULT 0,
     Status NVARCHAR(50) DEFAULT N'فعال',
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (PartyId) REFERENCES Parties(Id),
-    FOREIGN KEY (ClientContractId) REFERENCES ClientContracts(Id)
+    FOREIGN KEY (PartyId) REFERENCES dbo.Parties(Id),
+    FOREIGN KEY (ClientContractId) REFERENCES dbo.ClientContracts(Id)
 );
 GO
 
 -- ============================================================
 -- 12. ContractArchives
 -- ============================================================
-IF OBJECT_ID('ContractArchives', 'U') IS NULL
-CREATE TABLE ContractArchives (
+IF OBJECT_ID('dbo.ContractArchives', 'U') IS NULL
+CREATE TABLE dbo.ContractArchives (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     ArchiveDate DATETIME NULL,
@@ -272,15 +273,15 @@ CREATE TABLE ContractArchives (
     DepartmentName NVARCHAR(100) NULL,
     CompanyId INT NULL,
     CompanyTitle NVARCHAR(255) NULL,
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id) ON DELETE CASCADE
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id) ON DELETE CASCADE
 );
 GO
 
 -- ============================================================
 -- 13. InsuranceRecords
 -- ============================================================
-IF OBJECT_ID('InsuranceRecords', 'U') IS NULL
-CREATE TABLE InsuranceRecords (
+IF OBJECT_ID('dbo.InsuranceRecords', 'U') IS NULL
+CREATE TABLE dbo.InsuranceRecords (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NULL,
     NationalCode NVARCHAR(50) NULL,
@@ -326,8 +327,8 @@ GO
 -- ============================================================
 -- 14. WorkshopRecords
 -- ============================================================
-IF OBJECT_ID('WorkshopRecords', 'U') IS NULL
-CREATE TABLE WorkshopRecords (
+IF OBJECT_ID('dbo.WorkshopRecords', 'U') IS NULL
+CREATE TABLE dbo.WorkshopRecords (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     WorkshopCode NVARCHAR(50) NULL,
     CompanyId INT NULL,
@@ -363,8 +364,8 @@ GO
 -- ============================================================
 -- 15. Payrolls — شامل SupplementaryInsuranceDeduction
 -- ============================================================
-IF OBJECT_ID('Payrolls', 'U') IS NULL
-CREATE TABLE Payrolls (
+IF OBJECT_ID('dbo.Payrolls', 'U') IS NULL
+CREATE TABLE dbo.Payrolls (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     Year INT NOT NULL,
@@ -380,20 +381,20 @@ CREATE TABLE Payrolls (
     SupplementaryInsuranceDeduction DECIMAL(18,0) DEFAULT 0,
     CalculatedAt DATETIME DEFAULT GETDATE(),
     CONSTRAINT UQ_Payroll UNIQUE (EmployeeId, Year, Month),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ستون حیاتی — برای دیتابیس‌های قبلی
-IF COL_LENGTH('Payrolls', 'SupplementaryInsuranceDeduction') IS NULL
-    ALTER TABLE Payrolls ADD SupplementaryInsuranceDeduction DECIMAL(18,0) DEFAULT 0;
+IF COL_LENGTH('dbo.Payrolls', 'SupplementaryInsuranceDeduction') IS NULL
+    ALTER TABLE dbo.Payrolls ADD SupplementaryInsuranceDeduction DECIMAL(18,0) DEFAULT 0;
 GO
 
 -- ============================================================
 -- 16. SalarySettings
 -- ============================================================
-IF OBJECT_ID('SalarySettings', 'U') IS NULL
-CREATE TABLE SalarySettings (
+IF OBJECT_ID('dbo.SalarySettings', 'U') IS NULL
+CREATE TABLE dbo.SalarySettings (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Year INT NOT NULL,
     MinimumWage DECIMAL(18,0) NOT NULL DEFAULT 0,
@@ -411,23 +412,23 @@ GO
 -- ============================================================
 -- 17. TaxBrackets
 -- ============================================================
-IF OBJECT_ID('TaxBrackets', 'U') IS NULL
-CREATE TABLE TaxBrackets (
+IF OBJECT_ID('dbo.TaxBrackets', 'U') IS NULL
+CREATE TABLE dbo.TaxBrackets (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Year INT NOT NULL,
     FromAmount DECIMAL(18,2) NOT NULL,
     ToAmount DECIMAL(18,2) NULL,
     TaxRate DECIMAL(5,4) NOT NULL,
     CONSTRAINT FK_TaxBrackets_SalarySettings
-        FOREIGN KEY (Year) REFERENCES SalarySettings(Year) ON DELETE CASCADE
+        FOREIGN KEY (Year) REFERENCES dbo.SalarySettings(Year) ON DELETE CASCADE
 );
 GO
 
 -- ============================================================
 -- 18. ClientPayments
 -- ============================================================
-IF OBJECT_ID('ClientPayments', 'U') IS NULL
-CREATE TABLE ClientPayments (
+IF OBJECT_ID('dbo.ClientPayments', 'U') IS NULL
+CREATE TABLE dbo.ClientPayments (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     ContractId INT NOT NULL,
     PaymentDate DATETIME NOT NULL,
@@ -435,15 +436,15 @@ CREATE TABLE ClientPayments (
     PaymentType NVARCHAR(50) NULL,
     Description NVARCHAR(MAX) NULL,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (ContractId) REFERENCES ClientContracts(Id)
+    FOREIGN KEY (ContractId) REFERENCES dbo.ClientContracts(Id)
 );
 GO
 
 -- ============================================================
 -- 19. ClientStatements
 -- ============================================================
-IF OBJECT_ID('ClientStatements', 'U') IS NULL
-CREATE TABLE ClientStatements (
+IF OBJECT_ID('dbo.ClientStatements', 'U') IS NULL
+CREATE TABLE dbo.ClientStatements (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     ContractId INT NOT NULL,
     StatementNumber NVARCHAR(100) NULL,
@@ -453,15 +454,15 @@ CREATE TABLE ClientStatements (
     Deductions DECIMAL(18,0) DEFAULT 0,
     NetReceivableAmount DECIMAL(18,0) DEFAULT 0,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (ContractId) REFERENCES ClientContracts(Id)
+    FOREIGN KEY (ContractId) REFERENCES dbo.ClientContracts(Id)
 );
 GO
 
 -- ============================================================
 -- 20. ContractorGuarantees
 -- ============================================================
-IF OBJECT_ID('ContractorGuarantees', 'U') IS NULL
-CREATE TABLE ContractorGuarantees (
+IF OBJECT_ID('dbo.ContractorGuarantees', 'U') IS NULL
+CREATE TABLE dbo.ContractorGuarantees (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     ContractId INT NOT NULL,
     GuaranteeNumber NVARCHAR(100) NULL,
@@ -473,15 +474,15 @@ CREATE TABLE ContractorGuarantees (
     Status NVARCHAR(50) DEFAULT N'فعال',
     Description NVARCHAR(MAX) NULL,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (ContractId) REFERENCES ContractorContracts(Id)
+    FOREIGN KEY (ContractId) REFERENCES dbo.ContractorContracts(Id)
 );
 GO
 
 -- ============================================================
 -- 21. ContractorStatements
 -- ============================================================
-IF OBJECT_ID('ContractorStatements', 'U') IS NULL
-CREATE TABLE ContractorStatements (
+IF OBJECT_ID('dbo.ContractorStatements', 'U') IS NULL
+CREATE TABLE dbo.ContractorStatements (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     ContractId INT NOT NULL,
     StatementNumber NVARCHAR(100) NULL,
@@ -494,15 +495,15 @@ CREATE TABLE ContractorStatements (
     AdvanceRecovery DECIMAL(18,0) DEFAULT 0,
     NetPayableAmount DECIMAL(18,0) DEFAULT 0,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (ContractId) REFERENCES ContractorContracts(Id)
+    FOREIGN KEY (ContractId) REFERENCES dbo.ContractorContracts(Id)
 );
 GO
 
 -- ============================================================
 -- 22. ContractorPayments
 -- ============================================================
-IF OBJECT_ID('ContractorPayments', 'U') IS NULL
-CREATE TABLE ContractorPayments (
+IF OBJECT_ID('dbo.ContractorPayments', 'U') IS NULL
+CREATE TABLE dbo.ContractorPayments (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     ContractId INT NOT NULL,
     PaymentDate DATETIME NOT NULL,
@@ -510,15 +511,15 @@ CREATE TABLE ContractorPayments (
     PaymentType NVARCHAR(50) NULL,
     Description NVARCHAR(MAX) NULL,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (ContractId) REFERENCES ContractorContracts(Id)
+    FOREIGN KEY (ContractId) REFERENCES dbo.ContractorContracts(Id)
 );
 GO
 
 -- ============================================================
 -- 23. ProjectExpenses
 -- ============================================================
-IF OBJECT_ID('ProjectExpenses', 'U') IS NULL
-CREATE TABLE ProjectExpenses (
+IF OBJECT_ID('dbo.ProjectExpenses', 'U') IS NULL
+CREATE TABLE dbo.ProjectExpenses (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     ClientContractId INT NOT NULL,
     PartyId INT NULL,
@@ -527,16 +528,16 @@ CREATE TABLE ProjectExpenses (
     Amount DECIMAL(18,2) NOT NULL,
     Description NVARCHAR(MAX) NULL,
     CreatedAt DATETIME NOT NULL DEFAULT GETDATE(),
-    FOREIGN KEY (ClientContractId) REFERENCES ClientContracts(Id),
-    FOREIGN KEY (PartyId) REFERENCES Parties(Id)
+    FOREIGN KEY (ClientContractId) REFERENCES dbo.ClientContracts(Id),
+    FOREIGN KEY (PartyId) REFERENCES dbo.Parties(Id)
 );
 GO
 
 -- ============================================================
 -- 24. PartyBankAccounts
 -- ============================================================
-IF OBJECT_ID('PartyBankAccounts', 'U') IS NULL
-CREATE TABLE PartyBankAccounts (
+IF OBJECT_ID('dbo.PartyBankAccounts', 'U') IS NULL
+CREATE TABLE dbo.PartyBankAccounts (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     PartyId INT NOT NULL,
     ShebaNumber NVARCHAR(100) NOT NULL,
@@ -544,15 +545,15 @@ CREATE TABLE PartyBankAccounts (
     BankName NVARCHAR(150) NULL,
     IsMainAccount INT DEFAULT 0,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (PartyId) REFERENCES Parties(Id)
+    FOREIGN KEY (PartyId) REFERENCES dbo.Parties(Id)
 );
 GO
 
 -- ============================================================
 -- 25. DailyWageRates
 -- ============================================================
-IF OBJECT_ID('DailyWageRates', 'U') IS NULL
-CREATE TABLE DailyWageRates (
+IF OBJECT_ID('dbo.DailyWageRates', 'U') IS NULL
+CREATE TABLE dbo.DailyWageRates (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Year INT NOT NULL,
     Category NVARCHAR(100) NOT NULL,
@@ -564,8 +565,8 @@ GO
 -- ============================================================
 -- 26. EmployeeContracts
 -- ============================================================
-IF OBJECT_ID('EmployeeContracts', 'U') IS NULL
-CREATE TABLE EmployeeContracts (
+IF OBJECT_ID('dbo.EmployeeContracts', 'U') IS NULL
+CREATE TABLE dbo.EmployeeContracts (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     ContractNumber NVARCHAR(100) NULL,
@@ -591,15 +592,15 @@ CREATE TABLE EmployeeContracts (
     HasInsurance INT DEFAULT 1,
     Status NVARCHAR(50) DEFAULT N'فعال',
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 27. EmployeeLoans
 -- ============================================================
-IF OBJECT_ID('EmployeeLoans', 'U') IS NULL
-CREATE TABLE EmployeeLoans (
+IF OBJECT_ID('dbo.EmployeeLoans', 'U') IS NULL
+CREATE TABLE dbo.EmployeeLoans (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     TotalAmount DECIMAL(18,0) NOT NULL,
@@ -608,15 +609,15 @@ CREATE TABLE EmployeeLoans (
     LoanDate DATETIME NOT NULL DEFAULT GETDATE(),
     Description NVARCHAR(MAX) NULL,
     IsActive INT DEFAULT 1,
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 28. LeaveRequests
 -- ============================================================
-IF OBJECT_ID('LeaveRequests', 'U') IS NULL
-CREATE TABLE LeaveRequests (
+IF OBJECT_ID('dbo.LeaveRequests', 'U') IS NULL
+CREATE TABLE dbo.LeaveRequests (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     LeaveType NVARCHAR(50) NOT NULL,
@@ -626,15 +627,15 @@ CREATE TABLE LeaveRequests (
     Description NVARCHAR(MAX) NULL,
     Status NVARCHAR(50) DEFAULT N'در انتظار',
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 29. Attendance
 -- ============================================================
-IF OBJECT_ID('Attendance', 'U') IS NULL
-CREATE TABLE Attendance (
+IF OBJECT_ID('dbo.Attendance', 'U') IS NULL
+CREATE TABLE dbo.Attendance (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     Year INT NOT NULL,
@@ -645,15 +646,15 @@ CREATE TABLE Attendance (
     AbsenceDays INT DEFAULT 0,
     CreatedAt DATETIME DEFAULT GETDATE(),
     CONSTRAINT UQ_Attendance UNIQUE (EmployeeId, Year, Month),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 30. AuditLogs
 -- ============================================================
-IF OBJECT_ID('AuditLogs', 'U') IS NULL
-CREATE TABLE AuditLogs (
+IF OBJECT_ID('dbo.AuditLogs', 'U') IS NULL
+CREATE TABLE dbo.AuditLogs (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Username NVARCHAR(100) NULL,
     ActionType NVARCHAR(50) NULL,
@@ -666,8 +667,8 @@ GO
 -- ============================================================
 -- 31. Attachments
 -- ============================================================
-IF OBJECT_ID('Attachments', 'U') IS NULL
-CREATE TABLE Attachments (
+IF OBJECT_ID('dbo.Attachments', 'U') IS NULL
+CREATE TABLE dbo.Attachments (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EntityType NVARCHAR(50) NOT NULL,
     EntityId INT NOT NULL,
@@ -681,8 +682,8 @@ GO
 -- ============================================================
 -- 32. Settlements
 -- ============================================================
-IF OBJECT_ID('Settlements', 'U') IS NULL
-CREATE TABLE Settlements (
+IF OBJECT_ID('dbo.Settlements', 'U') IS NULL
+CREATE TABLE dbo.Settlements (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     SettlementDate DATETIME NOT NULL,
@@ -693,15 +694,15 @@ CREATE TABLE Settlements (
     RemainingLoan DECIMAL(18,0) DEFAULT 0,
     NetSettlement DECIMAL(18,0) DEFAULT 0,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 33. YearEndBonuses
 -- ============================================================
-IF OBJECT_ID('YearEndBonuses', 'U') IS NULL
-CREATE TABLE YearEndBonuses (
+IF OBJECT_ID('dbo.YearEndBonuses', 'U') IS NULL
+CREATE TABLE dbo.YearEndBonuses (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     Year INT NOT NULL,
@@ -712,15 +713,15 @@ CREATE TABLE YearEndBonuses (
     NetBonus DECIMAL(18,0) DEFAULT 0,
     CreatedAt DATETIME DEFAULT GETDATE(),
     CONSTRAINT UQ_YearEndBonus UNIQUE (EmployeeId, Year),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 34. EmployeeSupplementaryInsurances
 -- ============================================================
-IF OBJECT_ID('EmployeeSupplementaryInsurances', 'U') IS NULL
-CREATE TABLE EmployeeSupplementaryInsurances (
+IF OBJECT_ID('dbo.EmployeeSupplementaryInsurances', 'U') IS NULL
+CREATE TABLE dbo.EmployeeSupplementaryInsurances (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     EmployeeId INT NOT NULL,
     TotalAmount DECIMAL(18,0) NOT NULL,
@@ -730,15 +731,15 @@ CREATE TABLE EmployeeSupplementaryInsurances (
     Description NVARCHAR(MAX) NULL,
     IsActive INT DEFAULT 1,
     CreatedAt DATETIME DEFAULT GETDATE(),
-    FOREIGN KEY (EmployeeId) REFERENCES Employees(Id)
+    FOREIGN KEY (EmployeeId) REFERENCES dbo.Employees(Id)
 );
 GO
 
 -- ============================================================
 -- 35. Tafsilis
 -- ============================================================
-IF OBJECT_ID('Tafsilis', 'U') IS NULL
-CREATE TABLE Tafsilis (
+IF OBJECT_ID('dbo.Tafsilis', 'U') IS NULL
+CREATE TABLE dbo.Tafsilis (
     Id INT IDENTITY(1,1) PRIMARY KEY,
     Code NVARCHAR(50) NOT NULL,
     PersonType NVARCHAR(50) DEFAULT N'شخص حقیقی',
@@ -759,23 +760,23 @@ GO
 -- Indexes
 -- ============================================================
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Employees_PersonnelCode')
-    CREATE INDEX IX_Employees_PersonnelCode ON Employees(PersonnelCode);
+    CREATE INDEX IX_Employees_PersonnelCode ON dbo.Employees(PersonnelCode);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Employees_NationalCode')
-    CREATE INDEX IX_Employees_NationalCode ON Employees(NationalCode);
+    CREATE INDEX IX_Employees_NationalCode ON dbo.Employees(NationalCode);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Payrolls_Year_Month')
-    CREATE INDEX IX_Payrolls_Year_Month ON Payrolls(Year, Month);
+    CREATE INDEX IX_Payrolls_Year_Month ON dbo.Payrolls(Year, Month);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Attendance_Year_Month')
-    CREATE INDEX IX_Attendance_Year_Month ON Attendance(Year, Month);
+    CREATE INDEX IX_Attendance_Year_Month ON dbo.Attendance(Year, Month);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_AuditLogs_LogDate')
-    CREATE INDEX IX_AuditLogs_LogDate ON AuditLogs(LogDate DESC);
+    CREATE INDEX IX_AuditLogs_LogDate ON dbo.AuditLogs(LogDate DESC);
 GO
 
 -- ============================================================
 -- Seed Data — Banks
 -- ============================================================
-IF NOT EXISTS (SELECT 1 FROM Banks)
+IF NOT EXISTS (SELECT 1 FROM dbo.Banks)
 BEGIN
-    INSERT INTO Banks (BankCode, BankName) VALUES
+    INSERT INTO dbo.Banks (BankCode, BankName) VALUES
     (N'010', N'بانک مرکزی جمهوری اسلامی ایران'),
     (N'011', N'بانک صنعت و معدن'),
     (N'012', N'بانک ملت'),
@@ -808,9 +809,9 @@ GO
 -- ============================================================
 -- Seed Data — Departments
 -- ============================================================
-IF NOT EXISTS (SELECT 1 FROM Departments)
+IF NOT EXISTS (SELECT 1 FROM dbo.Departments)
 BEGIN
-    INSERT INTO Departments (Name) VALUES
+    INSERT INTO dbo.Departments (Name) VALUES
     (N'مدیریت'), (N'فنی'), (N'مالی'), (N'منابع انسانی');
 END
 GO
@@ -818,9 +819,9 @@ GO
 -- ============================================================
 -- Seed Data — LookupItems
 -- ============================================================
-IF NOT EXISTS (SELECT 1 FROM LookupItems)
+IF NOT EXISTS (SELECT 1 FROM dbo.LookupItems)
 BEGIN
-    INSERT INTO LookupItems (Category, Value) VALUES
+    INSERT INTO dbo.LookupItems (Category, Value) VALUES
     (N'Gender', N'مرد'), (N'Gender', N'زن'),
     (N'Education', N'زیر دیپلم'), (N'Education', N'دیپلم'),
     (N'Education', N'کاردانی'), (N'Education', N'کارشناسی'),
@@ -834,9 +835,9 @@ GO
 -- ============================================================
 -- Seed Data — SalarySettings 1403
 -- ============================================================
-IF NOT EXISTS (SELECT 1 FROM SalarySettings WHERE Year = 1403)
+IF NOT EXISTS (SELECT 1 FROM dbo.SalarySettings WHERE Year = 1403)
 BEGIN
-    INSERT INTO SalarySettings
+    INSERT INTO dbo.SalarySettings
         (Year, MinimumWage, HousingAllowance, FoodAllowance,
          ChildAllowanceRate, InsuranceEmployeeRate, InsuranceEmployerRate, TaxExemptionLimit)
     VALUES (1403, 71696040, 9000000, 14000000, 10, 7, 23, 1200000000);
@@ -846,9 +847,9 @@ GO
 -- ============================================================
 -- Seed Data — TaxBrackets 1403
 -- ============================================================
-IF NOT EXISTS (SELECT 1 FROM TaxBrackets WHERE Year = 1403)
+IF NOT EXISTS (SELECT 1 FROM dbo.TaxBrackets WHERE Year = 1403)
 BEGIN
-    INSERT INTO TaxBrackets (Year, FromAmount, ToAmount, TaxRate) VALUES
+    INSERT INTO dbo.TaxBrackets (Year, FromAmount, ToAmount, TaxRate) VALUES
     (1403, 0,           1000000000, 0.10),
     (1403, 1000000000,  1500000000, 0.15),
     (1403, 1500000000,  2300000000, 0.20),
@@ -860,12 +861,12 @@ GO
 -- Seed Data — admin (رمز: admin — SHA256)
 -- ⚠️ بلافاصله بعد از اولین ورود رمز را تغییر دهید!
 -- ============================================================
-IF NOT EXISTS (SELECT 1 FROM Users WHERE Username = N'admin')
+IF NOT EXISTS (SELECT 1 FROM dbo.Users WHERE Username = N'admin')
 BEGIN
-    INSERT INTO Users (Username, PasswordHash, Role, IsActive)
+    INSERT INTO dbo.Users (Username, PasswordHash, Role, IsActive, MustChangePassword)
     VALUES (N'admin',
             '8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918',
-            N'Admin', 1);
+            N'Admin', 1, 1);
 END
 GO
 

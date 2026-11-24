@@ -3,164 +3,164 @@ using System.Data;
 using System.Drawing;
 using System.Windows.Forms;
 using Microsoft.Data.SqlClient;
-using SMP.Forms;
+using Smp.Forms;
 
-namespace SMP.Helpers
+namespace Smp.Helpers;
+
+public static class PartySelectionHelper
 {
-    public static class PartySelectionHelper
+    public static (int Id, string Name) ShowSelectionDialog(
+        string connectionString,
+        bool isContractor,
+        IWin32Window owner = null)
     {
-        public static (int Id, string Name) ShowSelectionDialog(
-            string connectionString,
-            bool isContractor,
-            IWin32Window owner = null)
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new ArgumentException("رشته اتصال خالی است.", nameof(connectionString));
+
+        int selectedId = 0;
+        string selectedName = "";
+
+        using var form = new Form
         {
-            if (string.IsNullOrWhiteSpace(connectionString))
-                throw new ArgumentException("رشته اتصال خالی است.", nameof(connectionString));
+            Text = isContractor ? "انتخاب پیمانکار" : "انتخاب کارفرما",
+            Size = new Size(900, 620),
+            MinimumSize = new Size(700, 500),
+            StartPosition = owner is not null
+                ? FormStartPosition.CenterParent
+                : FormStartPosition.CenterScreen,
+            RightToLeft = RightToLeft.Yes,
+            RightToLeftLayout = true,
+            Font = ModernTheme.GetFont(12f),
+            MaximizeBox = false,
+            MinimizeBox = false,
+            FormBorderStyle = FormBorderStyle.Sizable,
+            BackColor = ModernTheme.Background,
+            ShowInTaskbar = false
+        };
 
-            int selectedId = 0;
-            string selectedName = "";
+        var pnlTop = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 64,
+            Padding = new Padding(12, 12, 12, 8),
+            BackColor = Color.FromArgb(241, 245, 249)
+        };
 
-            using var form = new Form
+        var btnManage = new Button
+        {
+            Text = "➕ مدیریت / تعریف جدید",
+            Dock = DockStyle.Right,
+            Width = 190,
+            BackColor = ModernTheme.Primary,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = ModernTheme.GetFont(11f, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            UseVisualStyleBackColor = false
+        };
+        btnManage.FlatAppearance.BorderSize = 0;
+
+        var txtSearch = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Font = ModernTheme.GetFont(12f),
+            PlaceholderText = "جستجو بر اساس نام یا کد ملی / شناسه ملی...",
+            BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0)
+        };
+
+        var txtWrap = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0, 4, 12, 4)
+        };
+        txtWrap.Controls.Add(txtSearch);
+
+        pnlTop.Controls.Add(txtWrap);
+        pnlTop.Controls.Add(btnManage);
+
+        var dgv = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AllowUserToResizeRows = false,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = false,
+            BackgroundColor = Color.White,
+            BorderStyle = BorderStyle.None,
+            EnableHeadersVisualStyles = false,
+            RightToLeft = RightToLeft.Yes,
+            RowTemplate = { Height = 36 },
+            ColumnHeadersHeight = 42,
+            ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing
+        };
+
+        dgv.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(226, 232, 240);
+        dgv.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(30, 41, 59);
+        dgv.ColumnHeadersDefaultCellStyle.Font = ModernTheme.GetFont(11.5f, FontStyle.Bold);
+        dgv.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+        dgv.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+        dgv.DefaultCellStyle.SelectionBackColor = Color.FromArgb(219, 234, 254);
+        dgv.DefaultCellStyle.SelectionForeColor = Color.FromArgb(30, 41, 59);
+        dgv.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(249, 250, 251);
+
+        var pnlBottom = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 56,
+            Padding = new Padding(12, 10, 12, 10),
+            BackColor = Color.FromArgb(249, 250, 251)
+        };
+
+        var btnSelect = new Button
+        {
+            Text = "✔ انتخاب",
+            DialogResult = DialogResult.OK,
+            Dock = DockStyle.Left,
+            Width = 140,
+            BackColor = ModernTheme.Success,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = ModernTheme.GetFont(11f, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            UseVisualStyleBackColor = false
+        };
+        btnSelect.FlatAppearance.BorderSize = 0;
+
+        var btnCancel = new Button
+        {
+            Text = "انصراف",
+            DialogResult = DialogResult.Cancel,
+            Dock = DockStyle.Left,
+            Width = 110,
+            BackColor = Color.White,
+            ForeColor = Color.FromArgb(80, 80, 80),
+            FlatStyle = FlatStyle.Flat,
+            Font = ModernTheme.GetFont(11f),
+            Cursor = Cursors.Hand,
+            Margin = new Padding(8, 0, 0, 0)
+        };
+        btnCancel.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
+
+        pnlBottom.Controls.Add(btnCancel);
+        pnlBottom.Controls.Add(btnSelect);
+
+        DataTable dt = null;
+
+        void LoadData()
+        {
+            try
             {
-                Text = isContractor ? "انتخاب پیمانکار" : "انتخاب کارفرما",
-                Size = new Size(900, 620),
-                MinimumSize = new Size(700, 500),
-                StartPosition = owner != null
-                    ? FormStartPosition.CenterParent
-                    : FormStartPosition.CenterScreen,
-                RightToLeft = RightToLeft.Yes,
-                RightToLeftLayout = true,
-                Font = UIHelper.PersianFont(12f),
-                MaximizeBox = false,
-                MinimizeBox = false,
-                FormBorderStyle = FormBorderStyle.Sizable,
-                BackColor = UIHelper.WarmBackground,
-                ShowInTaskbar = false
-            };
+                using var conn = new SqlConnection(connectionString);
+                conn.Open();
 
-            var pnlTop = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 64,
-                Padding = new Padding(12, 12, 12, 8),
-                BackColor = Color.FromArgb(241, 245, 249)
-            };
+                string filterColumn = isContractor ? "IsContractor = 1" : "IsClient = 1";
 
-            var btnManage = new Button
-            {
-                Text = "➕ مدیریت / تعریف جدید",
-                Dock = DockStyle.Right,
-                Width = 190,
-                BackColor = UIHelper.SectionBlue,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = UIHelper.PersianFont(11f, FontStyle.Bold),
-                Cursor = Cursors.Hand,
-                UseVisualStyleBackColor = false
-            };
-            btnManage.FlatAppearance.BorderSize = 0;
-
-            var txtSearch = new TextBox
-            {
-                Dock = DockStyle.Fill,
-                Font = UIHelper.PersianFont(12f),
-                PlaceholderText = "جستجو بر اساس نام یا کد ملی / شناسه ملی...",
-                BorderStyle = BorderStyle.FixedSingle,
-                Margin = new Padding(0)
-            };
-
-            var txtWrap = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Padding = new Padding(0, 4, 12, 4)
-            };
-            txtWrap.Controls.Add(txtSearch);
-
-            pnlTop.Controls.Add(txtWrap);
-            pnlTop.Controls.Add(btnManage);
-
-            var dgv = new DataGridView
-            {
-                Dock = DockStyle.Fill,
-                ReadOnly = true,
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
-                AllowUserToResizeRows = false,
-                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                MultiSelect = false,
-                BackgroundColor = Color.White,
-                BorderStyle = BorderStyle.None,
-                EnableHeadersVisualStyles = false,
-                RightToLeft = RightToLeft.Yes,
-                RowTemplate = { Height = 36 },
-                ColumnHeadersHeight = 42,
-                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing
-            };
-
-            dgv.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(226, 232, 240);
-            dgv.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(30, 41, 59);
-            dgv.ColumnHeadersDefaultCellStyle.Font = UIHelper.PersianFont(11.5f, FontStyle.Bold);
-            dgv.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            dgv.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            dgv.DefaultCellStyle.SelectionBackColor = Color.FromArgb(219, 234, 254);
-            dgv.DefaultCellStyle.SelectionForeColor = Color.FromArgb(30, 41, 59);
-            dgv.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(249, 250, 251);
-
-            var pnlBottom = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 56,
-                Padding = new Padding(12, 10, 12, 10),
-                BackColor = Color.FromArgb(249, 250, 251)
-            };
-
-            var btnSelect = new Button
-            {
-                Text = "✔ انتخاب",
-                DialogResult = DialogResult.OK,
-                Dock = DockStyle.Left,
-                Width = 140,
-                BackColor = UIHelper.ActionGreen,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = UIHelper.PersianFont(11f, FontStyle.Bold),
-                Cursor = Cursors.Hand,
-                UseVisualStyleBackColor = false
-            };
-            btnSelect.FlatAppearance.BorderSize = 0;
-
-            var btnCancel = new Button
-            {
-                Text = "انصراف",
-                DialogResult = DialogResult.Cancel,
-                Dock = DockStyle.Left,
-                Width = 110,
-                BackColor = Color.White,
-                ForeColor = Color.FromArgb(80, 80, 80),
-                FlatStyle = FlatStyle.Flat,
-                Font = UIHelper.PersianFont(11f),
-                Cursor = Cursors.Hand,
-                Margin = new Padding(8, 0, 0, 0)
-            };
-            btnCancel.FlatAppearance.BorderColor = Color.FromArgb(200, 200, 200);
-
-            pnlBottom.Controls.Add(btnCancel);
-            pnlBottom.Controls.Add(btnSelect);
-
-            DataTable dt = null;
-
-            void LoadData()
-            {
-                try
-                {
-                    using var conn = new SqlConnection(connectionString);
-                    conn.Open();
-
-                    string filterColumn = isContractor ? "IsContractor = 1" : "IsClient = 1";
-
-                    // ✅ محاسبه DisplayName مستقیماً در SQL Server برای جلوگیری از خطای پارسر DataTable
-                    string sql = $@"
+                // ✅ محاسبه DisplayName مستقیماً در SQL Server برای جلوگیری از خطای پارسر DataTable
+                string sql = $@"
                         SELECT 
                             Id, 
                             PartyType, 
@@ -178,152 +178,151 @@ namespace SMP.Helpers
                         WHERE {filterColumn} 
                         ORDER BY DisplayName";
 
-                    using var cmd = new SqlCommand(sql, conn);
+                using var cmd = new SqlCommand(sql, conn);
 
-                    var loaded = new DataTable();
-                    using (var reader = cmd.ExecuteReader())
-                        loaded.Load(reader);
+                var loaded = new DataTable();
+                using (var reader = cmd.ExecuteReader())
+                    loaded.Load(reader);
 
-                    dt = loaded;
-                    dgv.DataSource = dt;
+                dt = loaded;
+                dgv.DataSource = dt;
 
-                    if (dgv.Columns["Id"] != null) dgv.Columns["Id"].Visible = false;
-                    if (dgv.Columns["FirstName"] != null) dgv.Columns["FirstName"].Visible = false;
-                    if (dgv.Columns["LastName"] != null) dgv.Columns["LastName"].Visible = false;
-                    if (dgv.Columns["CompanyName"] != null) dgv.Columns["CompanyName"].Visible = false;
+                if (dgv.Columns["Id"] is not null) dgv.Columns["Id"].Visible = false;
+                if (dgv.Columns["FirstName"] is not null) dgv.Columns["FirstName"].Visible = false;
+                if (dgv.Columns["LastName"] is not null) dgv.Columns["LastName"].Visible = false;
+                if (dgv.Columns["CompanyName"] is not null) dgv.Columns["CompanyName"].Visible = false;
 
-                    if (dgv.Columns["PartyType"] != null)
-                    {
-                        dgv.Columns["PartyType"].HeaderText = "نوع";
-                        dgv.Columns["PartyType"].FillWeight = 60;
-                    }
-                    if (dgv.Columns["DisplayName"] != null)
-                    {
-                        dgv.Columns["DisplayName"].HeaderText = "نام / شرکت";
-                        dgv.Columns["DisplayName"].DisplayIndex = 0;
-                        dgv.Columns["DisplayName"].FillWeight = 200;
-                    }
-                    if (dgv.Columns["NationalCode"] != null)
-                    {
-                        dgv.Columns["NationalCode"].HeaderText = "کد ملی";
-                        dgv.Columns["NationalCode"].FillWeight = 100;
-                    }
-                    if (dgv.Columns["NationalId"] != null)
-                    {
-                        dgv.Columns["NationalId"].HeaderText = "شناسه ملی";
-                        dgv.Columns["NationalId"].FillWeight = 100;
-                    }
-                }
-                catch (Exception ex)
+                if (dgv.Columns["PartyType"] is not null)
                 {
-                    LogHelper.LogException(ex, "PartySelectionHelper.LoadData");
-                    ModernMessageBox.ShowError("خطا در بارگذاری لیست طرفین قرارداد:\n" + ex.Message);
+                    dgv.Columns["PartyType"].HeaderText = "نوع";
+                    dgv.Columns["PartyType"].FillWeight = 60;
+                }
+                if (dgv.Columns["DisplayName"] is not null)
+                {
+                    dgv.Columns["DisplayName"].HeaderText = "نام / شرکت";
+                    dgv.Columns["DisplayName"].DisplayIndex = 0;
+                    dgv.Columns["DisplayName"].FillWeight = 200;
+                }
+                if (dgv.Columns["NationalCode"] is not null)
+                {
+                    dgv.Columns["NationalCode"].HeaderText = "کد ملی";
+                    dgv.Columns["NationalCode"].FillWeight = 100;
+                }
+                if (dgv.Columns["NationalId"] is not null)
+                {
+                    dgv.Columns["NationalId"].HeaderText = "شناسه ملی";
+                    dgv.Columns["NationalId"].FillWeight = 100;
                 }
             }
-
-            void ApplyFilter()
+            catch (Exception ex)
             {
-                if (dt == null) return;
+                LogHelper.LogException(ex, "PartySelectionHelper.LoadData");
+                ModernMessageBox.ShowError("خطا در بارگذاری لیست طرفین قرارداد:\n" + ex.Message);
+            }
+        }
 
-                string search = (txtSearch.Text ?? "").Trim();
-                if (string.IsNullOrEmpty(search))
-                {
-                    dt.DefaultView.RowFilter = "";
-                    return;
-                }
+        void ApplyFilter()
+        {
+            if (dt is null) return;
 
-                string safe = StringHelper.NormalizePersianText(search)
-                    .Replace("'", "''")
-                    .Replace("[", "[[]")
-                    .Replace("%", "[%]")
-                    .Replace("*", "[*]");
-
-                try
-                {
-                    dt.DefaultView.RowFilter =
-                        $"DisplayName LIKE '%{safe}%' " +
-                        $"OR NationalCode LIKE '%{safe}%' " +
-                        $"OR NationalId LIKE '%{safe}%'";
-                }
-                catch (Exception ex)
-                {
-                    LogHelper.LogWarning("RowFilter error: " + ex.Message, "PartySelectionHelper");
-                    dt.DefaultView.RowFilter = "";
-                }
+            string search = (txtSearch.Text ?? "").Trim();
+            if (string.IsNullOrEmpty(search))
+            {
+                dt.DefaultView.RowFilter = "";
+                return;
             }
 
-            bool TrySelectCurrentRow()
+            string safe = StringHelper.NormalizePersianText(search)
+                .Replace("'", "''")
+                .Replace("[", "[[]")
+                .Replace("%", "[%]")
+                .Replace("*", "[*]");
+
+            try
             {
-                var row = dgv.CurrentRow;
-                if (row == null || row.Index < 0) return false;
-
-                var idVal = row.Cells["Id"]?.Value;
-                if (idVal == null || idVal == DBNull.Value) return false;
-
-                selectedId = Convert.ToInt32(idVal);
-                selectedName = row.Cells["DisplayName"]?.Value?.ToString() ?? "";
-                return true;
+                dt.DefaultView.RowFilter =
+                    $"DisplayName LIKE '%{safe}%' " +
+                    $"OR NationalCode LIKE '%{safe}%' " +
+                    $"OR NationalId LIKE '%{safe}%'";
             }
-
-            txtSearch.TextChanged += (s, e) => ApplyFilter();
-
-            dgv.CellDoubleClick += (s, e) =>
+            catch (Exception ex)
             {
-                if (e.RowIndex >= 0 && TrySelectCurrentRow())
+                LogHelper.LogWarning("RowFilter error: " + ex.Message, "PartySelectionHelper");
+                dt.DefaultView.RowFilter = "";
+            }
+        }
+
+        bool TrySelectCurrentRow()
+        {
+            var row = dgv.CurrentRow;
+            if (row is null || row.Index < 0) return false;
+
+            var idVal = row.Cells["Id"]?.Value;
+            if (idVal is null || idVal == DBNull.Value) return false;
+
+            selectedId = Convert.ToInt32(idVal);
+            selectedName = row.Cells["DisplayName"]?.Value?.ToString() ?? "";
+            return true;
+        }
+
+        txtSearch.TextChanged += (s, e) => ApplyFilter();
+
+        dgv.CellDoubleClick += (s, e) =>
+        {
+            if (e.RowIndex >= 0 && TrySelectCurrentRow())
+            {
+                form.DialogResult = DialogResult.OK;
+                form.Close();
+            }
+        };
+
+        dgv.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                if (TrySelectCurrentRow())
                 {
                     form.DialogResult = DialogResult.OK;
                     form.Close();
                 }
-            };
+            }
+        };
 
-            dgv.KeyDown += (s, e) =>
+        btnSelect.Click += (s, e) =>
+        {
+            if (!TrySelectCurrentRow())
             {
-                if (e.KeyCode == Keys.Enter)
-                {
-                    e.SuppressKeyPress = true;
-                    if (TrySelectCurrentRow())
-                    {
-                        form.DialogResult = DialogResult.OK;
-                        form.Close();
-                    }
-                }
-            };
+                form.DialogResult = DialogResult.None;
+                ModernMessageBox.ShowWarning("لطفاً یک طرف قرارداد را انتخاب کنید.");
+            }
+        };
 
-            btnSelect.Click += (s, e) =>
+        btnManage.Click += (s, e) =>
+        {
+            try
             {
-                if (!TrySelectCurrentRow())
-                {
-                    form.DialogResult = DialogResult.None;
-                    ModernMessageBox.ShowWarning("لطفاً یک طرف قرارداد را انتخاب کنید.");
-                }
-            };
-
-            btnManage.Click += (s, e) =>
+                using var f = new PartyManagementForm(connectionString);
+                f.ShowDialog(form);
+                LoadData();
+            }
+            catch (Exception ex)
             {
-                try
-                {
-                    using var f = new PartyManagementForm(connectionString);
-                    f.ShowDialog(form);
-                    LoadData();
-                }
-                catch (Exception ex)
-                {
-                    LogHelper.LogException(ex, "PartySelectionHelper.Manage");
-                    ModernMessageBox.ShowError("خطا در باز کردن فرم مدیریت طرفین:\n" + ex.Message);
-                }
-            };
+                LogHelper.LogException(ex, "PartySelectionHelper.Manage");
+                ModernMessageBox.ShowError("خطا در باز کردن فرم مدیریت طرفین:\n" + ex.Message);
+            }
+        };
 
-            form.Controls.Add(dgv);
-            form.Controls.Add(pnlTop);
-            form.Controls.Add(pnlBottom);
-            form.AcceptButton = btnSelect;
-            form.CancelButton = btnCancel;
+        form.Controls.Add(dgv);
+        form.Controls.Add(pnlTop);
+        form.Controls.Add(pnlBottom);
+        form.AcceptButton = btnSelect;
+        form.CancelButton = btnCancel;
 
-            LoadData();
+        LoadData();
 
-            return form.ShowDialog(owner) == DialogResult.OK && selectedId > 0
-                ? (selectedId, selectedName)
-                : (0, "");
-        }
+        return form.ShowDialog(owner) == DialogResult.OK && selectedId > 0
+            ? (selectedId, selectedName)
+            : (0, "");
     }
 }

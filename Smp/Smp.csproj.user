@@ -1,10 +1,19 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
-    <_LastSelectedProfileId>D:\PersonnelApp\PersonnelApp\PersonnelApp\Properties\PublishProfiles\FolderProfile.pubxml</_LastSelectedProfileId>
+    <_LastSelectedProfileId>D:\Smp\Smp\Smp\Properties\PublishProfiles\FolderProfile.pubxml</_LastSelectedProfileId>
   </PropertyGroup>
   <ItemGroup>
     <Compile Update="Forms\AccountTransferForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\AssetEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\AssetManagementForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\AssetPurchasePickerForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\AttachmentsForm.cs">
@@ -26,6 +35,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\BankPaymentForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\BatchContractPrintForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\BatchPayslipPrintForm.cs">
@@ -50,6 +62,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\CashTransactionListForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ChangePasswordForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\CheckbookManagementForm.cs">
@@ -142,6 +157,9 @@
     <Compile Update="Forms\DbfImportForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Update="Forms\DbfPreviewForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Update="Forms\DecreeManagementForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -205,7 +223,13 @@
     <Compile Update="Forms\MainSidebar.cs">
       <SubType>UserControl</SubType>
     </Compile>
+    <Compile Update="Forms\MainWelcomePanel.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Update="Forms\ManagementDashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\MissionForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\NonPersonnelInsuranceReportForm.cs">
@@ -215,6 +239,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\OfficialTaxReportForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\OtherReceiptForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\PartyBankAccountsForm.cs">
@@ -227,6 +254,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\PayrollHistoryForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\PayrollPeriodPickerForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\PayrollProcessForm.cs">
@@ -283,10 +313,19 @@
     <Compile Update="Forms\TafsiliSelectionForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Update="Forms\TankhahChargeForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahChargesForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Update="Forms\TankhahDetailForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\TankhahForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahImportPreviewForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\TankhahListEditForm.cs">
@@ -299,6 +338,9 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\TankhahRowEditForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\TankhahSettleForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\TankhahTransferForm.cs">
@@ -316,5 +358,37 @@
     <Compile Update="Forms\YearEndBonusForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Update="Helpers\Modern\ModernButton.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernChoiceTile.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernComboBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernContainers.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernEmployeePicker.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernListBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernReport.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\Modern\ModernTextBox.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Update="Helpers\PillSwitcher.cs">
+      <SubType>Component</SubType>
+    </Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="ContractTemplateWindow.xaml">
+      <SubType>Designer</SubType>
+    </None>
   </ItemGroup>
 </Project>

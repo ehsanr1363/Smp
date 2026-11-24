@@ -6,20 +6,33 @@
 		<LangVersion>latest</LangVersion>
 		<Nullable>enable</Nullable>
 		<UseWindowsForms>true</UseWindowsForms>
+		<UseWPF>true</UseWPF>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<ApplicationIcon>logo.ico</ApplicationIcon>
 	</PropertyGroup>
 
-	<ItemGroup>
+		<ItemGroup>
 		<Compile Remove="Forms\NewFolder1\**" />
+		<Compile Remove="Smp.Tests\**" />
+		<EmbeddedResource Remove="Smp.Tests\**" />
+		<None Remove="Smp.Tests\**" />
 		<EmbeddedResource Remove="Forms\NewFolder1\**" />
 		<None Remove="Forms\NewFolder1\**" />
 	</ItemGroup>
 
 	<ItemGroup>
-	  <Content Include="logo.ico">
-	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-	  </Content>
+		<Content Include="logo.ico">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Update="logo.png">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+		<None Update="App.config">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
 	</ItemGroup>
 
 	<ItemGroup>
@@ -28,7 +41,8 @@
 		<PackageReference Include="DotNetDBF" Version="7.0.1" />
 		<PackageReference Include="InsuranceToDbf" Version="1.0.9" />
 		<PackageReference Include="KamiSama.IranSystem" Version="2.8.7" />
-		<PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
+		<PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.2" />
+		<PackageReference Include="System.Configuration.ConfigurationManager" Version="8.0.1" />
 		<PackageReference Include="QuestPDF" Version="2026.9.1" />
 		<PackageReference Include="WinForms.DataVisualization" Version="1.10.2" />
 	</ItemGroup>

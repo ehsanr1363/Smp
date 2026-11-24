@@ -1,35 +1,34 @@
 ﻿using System;
 using System.IO;
 
-namespace SMP.Helpers
+namespace Smp.Helpers;
+
+public static class LegacyMigrationHelper
 {
-    public static class LegacyMigrationHelper
+    public static void MigrateIfNeeded()
     {
-        public static void MigrateIfNeeded()
+        try
         {
-            try
+            string oldAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Smp");
+            string newAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Smp");
+
+            if (Directory.Exists(newAppData)) return;
+            if (!Directory.Exists(oldAppData)) return;
+
+            Directory.CreateDirectory(newAppData);
+            foreach (var file in Directory.GetFiles(oldAppData, "*", SearchOption.AllDirectories))
             {
-                string oldAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PersonnelApp");
-                string newAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SMP");
-
-                if (Directory.Exists(newAppData)) return;
-                if (!Directory.Exists(oldAppData)) return;
-
-                Directory.CreateDirectory(newAppData);
-                foreach (var file in Directory.GetFiles(oldAppData, "*", SearchOption.AllDirectories))
+                try
                 {
-                    try
-                    {
-                        string relative = Path.GetRelativePath(oldAppData, file);
-                        string target = Path.Combine(newAppData, relative);
-                        string? dir = Path.GetDirectoryName(target);
-                        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                        File.Copy(file, target, overwrite: false);
-                    }
-                    catch { }
+                    string relative = Path.GetRelativePath(oldAppData, file);
+                    string target = Path.Combine(newAppData, relative);
+                    string? dir = Path.GetDirectoryName(target);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    File.Copy(file, target, overwrite: false);
                 }
+                catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "LegacyMigrationHelper"); }
             }
-            catch { }
         }
+        catch (Exception __ex) { Smp.Helpers.LogHelper.LogException(__ex, "LegacyMigrationHelper"); }
     }
 }

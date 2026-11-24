@@ -1,38 +1,37 @@
 ﻿using System.Collections.Generic;
-using SMP.Data;
-using SMP.Models;
+using Smp.Data;
+using Smp.Models;
 using System.Threading.Tasks;
 
-namespace SMP.Services
+namespace Smp.Services;
+
+public class LookupService
 {
-    public class LookupService
+    private readonly LookupRepository _lookupRepository;
+
+    public LookupService(LookupRepository lookupRepository)
     {
-        private readonly LookupRepository _lookupRepository;
+        _lookupRepository = lookupRepository;
+    }
 
-        public LookupService(LookupRepository lookupRepository)
-        {
-            _lookupRepository = lookupRepository;
-        }
+    public List<LookupItem> GetByCategory(string category)
+    {
+        return _lookupRepository.GetByCategory(category);
+    }
 
-        public List<LookupItem> GetByCategory(string category)
-        {
-            return _lookupRepository.GetByCategory(category);
-        }
+    // 👈 متد جدید Async
+    public async Task<List<LookupItem>> GetByCategoryAsync(string category)
+    {
+        return await _lookupRepository.GetByCategoryAsync(category);
+    }
 
-        // 👈 متد جدید Async
-        public async Task<List<LookupItem>> GetByCategoryAsync(string category)
-        {
-            return await _lookupRepository.GetByCategoryAsync(category);
-        }
+    public void Add(LookupItem lookupItem)
+    {
+        _lookupRepository.Add(lookupItem);
+    }
 
-        public void Add(LookupItem lookupItem)
-        {
-            _lookupRepository.Add(lookupItem);
-        }
-
-        public void Delete(int id)
-        {
-            _lookupRepository.Delete(id);
-        }
+    public void Delete(int id)
+    {
+        _lookupRepository.Delete(id);
     }
 }

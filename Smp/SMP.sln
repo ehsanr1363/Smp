@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Smp", "Smp.csproj", "{26385
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Smp.test", "..\..\Smp.test\Smp.test.csproj", "{1BBA0ED8-2949-9D06-DF5A-A0ED79731EC5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SmpApi", "..\SmpApi\SmpApi.csproj", "{5E6089D8-A31F-4E1B-A3DF-0E11239C9C3E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{1BBA0ED8-2949-9D06-DF5A-A0ED79731EC5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1BBA0ED8-2949-9D06-DF5A-A0ED79731EC5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1BBA0ED8-2949-9D06-DF5A-A0ED79731EC5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5E6089D8-A31F-4E1B-A3DF-0E11239C9C3E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5E6089D8-A31F-4E1B-A3DF-0E11239C9C3E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5E6089D8-A31F-4E1B-A3DF-0E11239C9C3E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5E6089D8-A31F-4E1B-A3DF-0E11239C9C3E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

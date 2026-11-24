@@ -1,48 +1,47 @@
 ﻿using System;
 using System.Reflection;
 
-namespace SMP.Helpers
+namespace Smp.Helpers;
+
+/// <summary>
+/// مهر زمانی خودکار: CreatedAt / UploadedAt / UpdatedAt / ...
+/// اگر مقدار پیش‌فرض (یا null) بود، اکنون را می‌گذارد.
+/// </summary>
+public static class DateStampHelper
 {
-    /// <summary>
-    /// مهر زمانی خودکار: CreatedAt / UploadedAt / UpdatedAt / ...
-    /// اگر مقدار پیش‌فرض (یا null) بود، اکنون را می‌گذارد.
-    /// </summary>
-    public static class DateStampHelper
+    private static readonly string[] CreatedNames =
+        { "CreatedAt", "UploadedAt", "InsertedAt", "RegisteredAt", "CreatedDate" };
+
+    private static readonly string[] UpdatedNames =
+        { "UpdatedAt", "ModifiedAt", "EditedAt", "LastModified" };
+
+    /// <summary>قبل از INSERT: اگر CreatedAt/UploadedAt خالی بود، اکنون بگذار.</summary>
+    public static void StampCreated(object entity) => Stamp(entity, CreatedNames);
+
+    /// <summary>قبل از UPDATE: اگر UpdatedAt خالی بود، اکنون بگذار.</summary>
+    public static void StampUpdated(object entity) => Stamp(entity, UpdatedNames);
+
+    private static void Stamp(object entity, string[] names)
     {
-        private static readonly string[] CreatedNames =
-            { "CreatedAt", "UploadedAt", "InsertedAt", "RegisteredAt", "CreatedDate" };
+        if (entity is null) return;
+        var type = entity.GetType();
 
-        private static readonly string[] UpdatedNames =
-            { "UpdatedAt", "ModifiedAt", "EditedAt", "LastModified" };
-
-        /// <summary>قبل از INSERT: اگر CreatedAt/UploadedAt خالی بود، اکنون بگذار.</summary>
-        public static void StampCreated(object entity) => Stamp(entity, CreatedNames);
-
-        /// <summary>قبل از UPDATE: اگر UpdatedAt خالی بود، اکنون بگذار.</summary>
-        public static void StampUpdated(object entity) => Stamp(entity, UpdatedNames);
-
-        private static void Stamp(object entity, string[] names)
+        foreach (var name in names)
         {
-            if (entity == null) return;
-            var type = entity.GetType();
+            var prop = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (prop is null || !prop.CanRead || !prop.CanWrite) continue;
 
-            foreach (var name in names)
+            var underlying = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+            if (underlying != typeof(DateTime)) continue;
+
+            var current = prop.GetValue(entity);
+            bool isEmpty = current is null
+                        || (current is DateTime dt && (dt == default || dt.Year < 1900));
+
+            if (isEmpty)
             {
-                var prop = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
-                if (prop == null || !prop.CanRead || !prop.CanWrite) continue;
-
-                var underlying = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
-                if (underlying != typeof(DateTime)) continue;
-
-                var current = prop.GetValue(entity);
-                bool isEmpty = current == null
-                            || (current is DateTime dt && (dt == default || dt.Year < 1900));
-
-                if (isEmpty)
-                {
-                    prop.SetValue(entity, DateTime.Now);
-                    return; // فقط اولین فیلد منطبق
-                }
+                prop.SetValue(entity, DateTime.Now);
+                return; // فقط اولین فیلد منطبق
             }
         }
     }

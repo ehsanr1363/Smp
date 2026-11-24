@@ -1,14 +1,13 @@
 ﻿using System;
 
-namespace SMP.Models
+namespace Smp.Models;
+
+public class AuditLog
 {
-    public class AuditLog
-    {
-        public int Id { get; set; }
-        public string Username { get; set; }
-        public string ActionType { get; set; } // مثلا: حذف، ویرایش، ثبت
-        public string ModuleName { get; set; } // مثلا: پرسنل، حقوق، مرخصی
-        public string Description { get; set; }
-        public DateTime LogDate { get; set; }
-    }
+    public int Id { get; set; }
+    public string Username { get; set; }
+    public string ActionType { get; set; } // مثلا: حذف، ویرایش، ثبت
+    public string ModuleName { get; set; } // مثلا: پرسنل، حقوق، مرخصی
+    public string Description { get; set; }
+    public DateTime LogDate { get; set; }
 }
